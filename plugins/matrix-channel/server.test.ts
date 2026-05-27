@@ -1532,3 +1532,63 @@ describe('reply dispatch: thread root resolution', () => {
     })
   })
 })
+
+// ── Typing indicator ──────────────────────────────────
+
+import { fireTypingIndicator } from './server'
+
+describe('fireTypingIndicator', () => {
+  const originalEnv = { ...process.env }
+  afterEach(() => { process.env = { ...originalEnv } })
+
+  test('fires PUT /typing with timeout 30000 when MATRIX_TYPING is unset (default on)', async () => {
+    delete process.env.MATRIX_TYPING
+    const calls: Array<{ url: string; method: string; body: string }> = []
+    const fakeFetch = (async (input: any, init: any) => {
+      calls.push({ url: String(input), method: init.method, body: String(init.body) })
+      return new Response(null, { status: 200 })
+    }) as typeof fetch
+
+    await fireTypingIndicator({
+      fetch: fakeFetch,
+      homeserverUrl: 'https://matrix.example.com',
+      accessToken: 'token',
+      userId: '@bot:example.com',
+      roomId: '!room:example.com',
+    })
+
+    expect(calls.length).toBe(1)
+    expect(calls[0].url).toBe(
+      'https://matrix.example.com/_matrix/client/v3/rooms/!room:example.com/typing/@bot:example.com',
+    )
+    expect(calls[0].method).toBe('PUT')
+    expect(JSON.parse(calls[0].body)).toEqual({ typing: true, timeout: 30000 })
+  })
+
+  test('skips PUT when MATRIX_TYPING=false', async () => {
+    process.env.MATRIX_TYPING = 'false'
+    const calls: Array<unknown> = []
+    const fakeFetch = (async () => { calls.push(true); return new Response() }) as typeof fetch
+    await fireTypingIndicator({
+      fetch: fakeFetch,
+      homeserverUrl: 'https://matrix.example.com',
+      accessToken: 'token',
+      userId: '@bot:example.com',
+      roomId: '!room:example.com',
+    })
+    expect(calls.length).toBe(0)
+  })
+
+  test('swallows HTTP errors (fire-and-forget)', async () => {
+    delete process.env.MATRIX_TYPING
+    const fakeFetch = (async () => new Response(null, { status: 429 })) as typeof fetch
+    // Must not throw — typing is non-critical.
+    await expect(fireTypingIndicator({
+      fetch: fakeFetch,
+      homeserverUrl: 'https://matrix.example.com',
+      accessToken: 'token',
+      userId: '@bot:example.com',
+      roomId: '!room:example.com',
+    })).resolves.toBeUndefined()
+  })
+})

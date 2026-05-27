@@ -648,6 +648,44 @@ async function matrixSend(
   return data.event_id
 }
 
+// ── Typing indicator ──────────────────────────────────────────────
+//
+// Fired once per inbound message, fire-and-forget. Matrix's server-side
+// timeout (30s) is enough to cover most Claude turn durations without a
+// renewal loop — same pattern as the Discord plugin.
+//
+// MATRIX_TYPING=false disables. Default: on.
+
+export interface FireTypingArgs {
+  fetch:         typeof globalThis.fetch
+  homeserverUrl: string
+  accessToken:   string
+  userId:        string
+  roomId:        string
+}
+
+export async function fireTypingIndicator(args: FireTypingArgs): Promise<void> {
+  if (process.env.MATRIX_TYPING === 'false') return
+
+  const url =
+    args.homeserverUrl.replace(/\/+$/, '') +
+    `/_matrix/client/v3/rooms/${args.roomId}` +
+    `/typing/${args.userId}`
+
+  try {
+    await args.fetch(url, {
+      method: 'PUT',
+      headers: {
+        Authorization: `Bearer ${args.accessToken}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({ typing: true, timeout: 30000 }),
+    })
+  } catch (err) {
+    console.error('[matrix] typing indicator failed (non-fatal):', err)
+  }
+}
+
 async function matrixJoin(config: Config, roomId: string): Promise<void> {
   const url = `${config.homeserverUrl}/_matrix/client/v3/join/${encodeURIComponent(roomId)}`
   const res = await fetch(url, {
@@ -994,6 +1032,15 @@ export async function processEvents(
     }
 
     lastActiveRoomState.roomId = event.roomId
+
+    // Fire typing indicator (best-effort; gated by MATRIX_TYPING env).
+    void fireTypingIndicator({
+      fetch: globalThis.fetch,
+      homeserverUrl: config.homeserverUrl,
+      accessToken:   config.accessToken,
+      userId:        config.botUserId,
+      roomId:        event.roomId,
+    })
 
     await mcp.notification({
       method: 'notifications/claude/channel',
