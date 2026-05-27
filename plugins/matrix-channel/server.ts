@@ -29,10 +29,13 @@ export interface Config {
   threadRootRoomId: string | null
 }
 
+export type ReplyToMode = 'first' | 'all' | 'off'
+
 export interface Access {
   allowedUsers: string[]
   ackReaction: string | null
   maxImageSize: number
+  replyToMode: ReplyToMode
 }
 
 // ── Config ─────────────────────────────────────────────
@@ -124,23 +127,47 @@ export function loadConfig(envDir?: string): Config {
   }
 }
 
+// ── Access config ─────────────────────────────────────────────────
+
+export function parseAccessJson(raw: string): Access {
+  const data = JSON.parse(raw) as {
+    allowedUsers?: unknown
+    ackReaction?:  unknown
+    maxImageSize?:  unknown
+    replyToMode?:  unknown
+  }
+
+  const allowedUsers = Array.isArray(data.allowedUsers)
+    ? data.allowedUsers.filter((u): u is string => typeof u === 'string')
+    : []
+
+  const ackReaction = typeof data.ackReaction === 'string' ? data.ackReaction : null
+
+  const maxImageSize = typeof data.maxImageSize === 'number' ? data.maxImageSize : 10 * 1024 * 1024
+
+  let replyToMode: ReplyToMode = 'first'
+  if (data.replyToMode !== undefined) {
+    if (data.replyToMode === 'first' || data.replyToMode === 'all' || data.replyToMode === 'off') {
+      replyToMode = data.replyToMode
+    } else {
+      throw new Error(`invalid replyToMode: ${String(data.replyToMode)} (expected first|all|off)`)
+    }
+  }
+
+  return { allowedUsers, ackReaction, maxImageSize, replyToMode }
+}
+
 export function loadAccess(path?: string): Access {
   const filePath = path ?? join(CHANNELS_DIR, 'access.json')
   if (!existsSync(filePath)) {
-    return { allowedUsers: [], ackReaction: null, maxImageSize: DEFAULT_MAX_IMAGE_SIZE }
+    return { allowedUsers: [], ackReaction: null, maxImageSize: DEFAULT_MAX_IMAGE_SIZE, replyToMode: 'first' }
   }
-  let raw: any
   try {
-    raw = JSON.parse(readFileSync(filePath, 'utf-8'))
+    return parseAccessJson(readFileSync(filePath, 'utf-8'))
   } catch (err) {
     console.error(`Failed to parse ${filePath}: ${err instanceof Error ? err.message : err}`)
     console.error('Falling back to default access config (no allowed users)')
-    return { allowedUsers: [], ackReaction: null, maxImageSize: DEFAULT_MAX_IMAGE_SIZE }
-  }
-  return {
-    allowedUsers: Array.isArray(raw.allowedUsers) ? raw.allowedUsers : [],
-    ackReaction: raw.ackReaction ?? null,
-    maxImageSize: typeof raw.maxImageSize === 'number' ? raw.maxImageSize : 10 * 1024 * 1024,
+    return { allowedUsers: [], ackReaction: null, maxImageSize: DEFAULT_MAX_IMAGE_SIZE, replyToMode: 'first' }
   }
 }
 
@@ -405,6 +432,125 @@ export function buildMessageBody(
   return body
 }
 
+// ── Edit message body ─────────────────────────────────────────────
+//
+// Emits an m.replace event with m.new_content for in-place edits.
+// When the original event was threaded, the replacement also carries
+// an m.thread nested inside m.relates_to so older Element clients
+// render the edit in the correct thread pane.
+
+export interface BuildEditMessageBodyArgs {
+  text:                  string
+  html?:                 string
+  eventId:               string
+  originalThreadRootId?: string
+}
+
+export function buildEditMessageBody(args: BuildEditMessageBodyArgs): Record<string, unknown> {
+  const newContent: Record<string, unknown> = {
+    msgtype: 'm.text',
+    body:    args.text,
+  }
+  if (args.html !== undefined) {
+    newContent.format         = 'org.matrix.custom.html'
+    newContent.formatted_body = args.html
+  }
+
+  const relatesTo: Record<string, unknown> = {
+    rel_type: 'm.replace',
+    event_id: args.eventId,
+  }
+  if (args.originalThreadRootId !== undefined) {
+    relatesTo['m.thread'] = {
+      event_id:        args.originalThreadRootId,
+      is_falling_back: true,
+      'm.in_reply_to': { event_id: args.originalThreadRootId },
+    }
+  }
+
+  const body: Record<string, unknown> = {
+    msgtype: 'm.text',
+    body:    '* ' + args.text,
+    'm.new_content': newContent,
+    'm.relates_to':  relatesTo,
+  }
+  if (args.html !== undefined) {
+    body.format         = 'org.matrix.custom.html'
+    body.formatted_body = '* ' + args.html
+  }
+
+  return body
+}
+
+// ── Edit message tool definition ──────────────────────────────────────────────
+
+export const editMessageToolDefinition = {
+  name: 'edit_message',
+  description:
+    'Edit a prior message authored by this bot. Use for in-place ' +
+    'progress updates that should NOT push-notify the recipient. ' +
+    'Always follow up with a final `reply` to wake the user when done. ' +
+    'Carries both m.replace (the edit) and m.thread (the original ' +
+    "thread membership, if any) so older clients render the edited " +
+    'message in the same thread.',
+  inputSchema: {
+    type: 'object' as const,
+    properties: {
+      room_id:  { type: 'string', description: 'Matrix room ID' },
+      event_id: { type: 'string', description: 'Event ID to edit. Must have been sent by this bot.' },
+      text:     { type: 'string', description: 'New plain-text body.' },
+      html:     { type: 'string', description: 'Optional new HTML body.' },
+    },
+    required: ['room_id', 'event_id', 'text'],
+  },
+} as const
+
+// ── fetchEventForEdit ────────────────────────────────────────────────────────
+
+export interface FetchEventForEditArgs {
+  fetch:         typeof globalThis.fetch
+  homeserverUrl: string
+  accessToken:   string
+  roomId:        string
+  eventId:       string
+}
+
+export interface EventEditInfo {
+  sender:        string
+  threadRootId?: string
+}
+
+export async function fetchEventForEdit(args: FetchEventForEditArgs): Promise<EventEditInfo> {
+  // Room IDs use ! and : which are valid unencoded in URI path segments;
+  // encodeURIComponent would encode the colon, breaking Matrix convention.
+  const encodedRoomId = args.roomId.replace(/[^!:.@a-zA-Z0-9_-]/g, encodeURIComponent)
+  const url =
+    args.homeserverUrl.replace(/\/+$/, '') +
+    `/_matrix/client/v3/rooms/${encodedRoomId}` +
+    `/event/${encodeURIComponent(args.eventId)}`
+
+  const res = await args.fetch(url, {
+    method:  'GET',
+    headers: { Authorization: `Bearer ${args.accessToken}` },
+  })
+  if (!res.ok) {
+    throw new Error(`fetchEventForEdit: HTTP ${res.status} on GET ${url}`)
+  }
+
+  const data = await res.json() as {
+    sender: string
+    content?: { 'm.relates_to'?: { rel_type?: string; event_id?: string } }
+  }
+
+  let threadRootId: string | undefined
+  const relates = data.content?.['m.relates_to']
+  if (relates?.rel_type === 'm.thread' && typeof relates.event_id === 'string') {
+    threadRootId = relates.event_id
+  }
+
+  return { sender: data.sender, threadRootId }
+}
+
 export function buildReactionBody(eventId: string, emoji: string) {
   return {
     'm.relates_to': {
@@ -648,6 +794,44 @@ async function matrixSend(
   return data.event_id
 }
 
+// ── Typing indicator ──────────────────────────────────────────────
+//
+// Fired once per inbound message, fire-and-forget. Matrix's server-side
+// timeout (30s) is enough to cover most Claude turn durations without a
+// renewal loop — same pattern as the Discord plugin.
+//
+// MATRIX_TYPING=false disables. Default: on.
+
+export interface FireTypingArgs {
+  fetch:         typeof globalThis.fetch
+  homeserverUrl: string
+  accessToken:   string
+  userId:        string
+  roomId:        string
+}
+
+export async function fireTypingIndicator(args: FireTypingArgs): Promise<void> {
+  if (process.env.MATRIX_TYPING === 'false') return
+
+  const url =
+    args.homeserverUrl.replace(/\/+$/, '') +
+    `/_matrix/client/v3/rooms/${args.roomId}` +
+    `/typing/${args.userId}`
+
+  try {
+    await args.fetch(url, {
+      method: 'PUT',
+      headers: {
+        Authorization: `Bearer ${args.accessToken}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({ typing: true, timeout: 30000 }),
+    })
+  } catch (err) {
+    console.error('[matrix] typing indicator failed (non-fatal):', err)
+  }
+}
+
 async function matrixJoin(config: Config, roomId: string): Promise<void> {
   const url = `${config.homeserverUrl}/_matrix/client/v3/join/${encodeURIComponent(roomId)}`
   const res = await fetch(url, {
@@ -787,7 +971,62 @@ async function relayPermissionRequest(
   )
 }
 
+// ── Reply tool ────────────────────────────────────────
+//
+// `reply_to_event_id` (new in this PR) routes the message into a
+// thread rooted under that event. When set, the outgoing message
+// carries rel_type: m.thread + is_falling_back: true +
+// m.in_reply_to so unthreaded clients (FluffyChat) still see it.
+// Omit to post top-level.
+
+export const replyToolDefinition = {
+  name: 'reply',
+  description: 'Send a message to a Matrix room',
+  inputSchema: {
+    type: 'object' as const,
+    properties: {
+      room_id: { type: 'string', description: 'Matrix room ID, e.g. !abc:example.com' },
+      text:    { type: 'string', description: 'Plain-text body' },
+      html:    { type: 'string', description: 'Optional HTML body' },
+      reply_to_event_id: {
+        type: 'string',
+        description:
+          'Event ID to thread under. When set, the message is sent as a ' +
+          'threaded reply (rel_type: m.thread) with proper m.in_reply_to ' +
+          'fallback so unthreaded clients still see it. Use this for ' +
+          'follow-ups, intermediate progress posts, and anything that ' +
+          'should land under the originating user message rather than ' +
+          'cluttering the room top-level. Omit to post top-level.',
+      },
+    },
+    required: ['room_id', 'text'],
+  },
+} as const
+
 // ── MCP Server ─────────────────────────────────────────
+
+export const mcpInstructions = [
+  'Messages arrive as <channel source="matrix" room_id="..." event_id="..."',
+  'sender="..." room_name="...">. To respond:',
+  '',
+  '  • Call `reply(room_id, text)` for a top-level message in the room.',
+  '  • Call `reply(room_id, text, reply_to_event_id=<inbound event_id>)` to',
+  "    thread the response under the user's message. Use this for any",
+  '    follow-up after the initial response — keeps the room uncluttered.',
+  '  • Call `edit_message(room_id, event_id, text)` to update a prior',
+  '    message you sent in-place, e.g. interim "still working — step 3 of',
+  '    5" status. Edits do NOT generate push notifications, so ALWAYS',
+  '    follow up with a final new `reply` to wake the user when work',
+  '    completes. The bot can only edit its own messages.',
+  '  • Call `react(room_id, event_id, emoji)` for lightweight status',
+  '    signals (👀 received, ✅ done, ❌ failed).',
+  '',
+  'Threading is per-call: pass `reply_to_event_id` on each reply that',
+  'should land in the thread. The plugin does NOT auto-thread; if you omit',
+  'the parameter, the message posts top-level. Read the inbound',
+  '`event_id` from the <channel> tag and use it as the thread root for',
+  'any narration that follows.',
+].join('\n')
 
 function createMcpServer(config: Config, threadRootByRoom: Map<string, string>): Server {
   const mcp = new Server(
@@ -800,11 +1039,7 @@ function createMcpServer(config: Config, threadRootByRoom: Map<string, string>):
         },
         tools: {},
       },
-      instructions:
-        'Messages arrive as <channel source="matrix" room_id="!abc:domain" room_name="General" sender="@user:domain" event_id="$evt:domain">. ' +
-        'Reply with the reply tool (pass room_id). React with the react tool (pass room_id, event_id, emoji). ' +
-        'When a message contains an image file path, use the Read tool to view it before responding. ' +
-        'Threading is handled automatically - replies are routed to the correct thread.',
+      instructions: mcpInstructions,
     },
   )
 
@@ -828,19 +1063,7 @@ function createMcpServer(config: Config, threadRootByRoom: Map<string, string>):
 
   mcp.setRequestHandler(ListToolsRequestSchema, async () => ({
     tools: [
-      {
-        name: 'reply',
-        description: 'Send a message to a Matrix room',
-        inputSchema: {
-          type: 'object' as const,
-          properties: {
-            room_id: { type: 'string', description: 'The room to send to (from channel tag)' },
-            text: { type: 'string', description: 'Plain text message' },
-            html: { type: 'string', description: 'Optional HTML-formatted message' },
-          },
-          required: ['room_id', 'text'],
-        },
-      },
+      replyToolDefinition,
       {
         name: 'react',
         description: 'React to a message with an emoji',
@@ -854,6 +1077,7 @@ function createMcpServer(config: Config, threadRootByRoom: Map<string, string>):
           required: ['room_id', 'event_id', 'emoji'],
         },
       },
+      editMessageToolDefinition,
     ],
   }))
 
@@ -865,8 +1089,12 @@ function createMcpServer(config: Config, threadRootByRoom: Map<string, string>):
         if (!args.room_id || !args.text) {
           return { content: [{ type: 'text', text: 'Missing required arguments: room_id and text' }], isError: true }
         }
-        const threadRootId = threadRootByRoom.get(args.room_id)
-        await matrixReply(config, args.room_id, args.text, args.html, threadRootId)
+        // Per-call reply_to_event_id wins over the static MATRIX_THREADS root.
+        // See docs/superpowers/specs/2026-05-27-matrix-channel-threading-tools-design.md
+        const threadRootId =
+          (args.reply_to_event_id as string | undefined) ??
+          threadRootByRoom.get(args.room_id as string)
+        await matrixReply(config, args.room_id, args.text as string, args.html as string | undefined, threadRootId)
         return { content: [{ type: 'text', text: 'sent' }] }
       }
       case 'react': {
@@ -875,6 +1103,49 @@ function createMcpServer(config: Config, threadRootByRoom: Map<string, string>):
         }
         await matrixReact(config, args.room_id, args.event_id, args.emoji)
         return { content: [{ type: 'text', text: 'reacted' }] }
+      }
+      case 'edit_message': {
+        const editArgs = req.params.arguments as {
+          room_id: string
+          event_id: string
+          text: string
+          html?: string
+        }
+
+        // Ownership + thread-state fetch (one round trip, two facts).
+        const info = await fetchEventForEdit({
+          fetch: globalThis.fetch,
+          homeserverUrl: config.homeserverUrl,
+          accessToken:   config.accessToken,
+          roomId:        editArgs.room_id,
+          eventId:       editArgs.event_id,
+        })
+
+        if (info.sender !== config.botUserId) {
+          return {
+            content: [
+              {
+                type: 'text',
+                text: JSON.stringify({
+                  ok: false,
+                  error: 'not_owned_by_bot',
+                  detail: `event ${editArgs.event_id} was sent by ${info.sender}, not ${config.botUserId}`,
+                }),
+              },
+            ],
+          }
+        }
+
+        const body = buildEditMessageBody({
+          text:                 editArgs.text,
+          html:                 editArgs.html,
+          eventId:              editArgs.event_id,
+          originalThreadRootId: info.threadRootId,
+        })
+
+        await matrixSend(config, editArgs.room_id, 'm.room.message', body as Record<string, any>)
+
+        return { content: [{ type: 'text', text: JSON.stringify({ ok: true }) }] }
       }
       default:
         throw new Error(`Unknown tool: ${req.params.name}`)
@@ -970,6 +1241,15 @@ export async function processEvents(
     }
 
     lastActiveRoomState.roomId = event.roomId
+
+    // Fire typing indicator (best-effort; gated by MATRIX_TYPING env).
+    void fireTypingIndicator({
+      fetch: globalThis.fetch,
+      homeserverUrl: config.homeserverUrl,
+      accessToken:   config.accessToken,
+      userId:        config.botUserId,
+      roomId:        event.roomId,
+    })
 
     await mcp.notification({
       method: 'notifications/claude/channel',

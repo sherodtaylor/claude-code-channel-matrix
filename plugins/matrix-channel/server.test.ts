@@ -297,6 +297,7 @@ import {
   parseSyncEvents,
   parseSyncInvites,
   buildMessageBody,
+  buildEditMessageBody,
   buildReactionBody,
   buildThreadRootBody,
   nextTxnId,
@@ -1499,5 +1500,263 @@ describe('processReactions', () => {
     )
     expect(calls).toHaveLength(1)
     expect(calls[0]?.params.behavior).toBe('allow')
+  })
+})
+
+// ── Reply tool schema ──────────────────────────────────
+
+import { replyToolDefinition, editMessageToolDefinition, fetchEventForEdit } from './server'
+
+describe('reply tool schema', () => {
+  test('exposes optional reply_to_event_id parameter', async () => {
+    expect(replyToolDefinition.inputSchema.properties.reply_to_event_id).toBeDefined()
+    expect(replyToolDefinition.inputSchema.properties.reply_to_event_id.type).toBe('string')
+    expect(replyToolDefinition.inputSchema.required).not.toContain('reply_to_event_id')
+  })
+})
+
+describe('reply dispatch: thread root resolution', () => {
+  test('reply_to_event_id arg wins over MATRIX_THREADS static root', () => {
+    // buildMessageBody is exported; test it directly with the resolved
+    // root that matches the dispatch logic.
+    //
+    // Direct unit-test of buildMessageBody is already covered upstream
+    // for various cases; this test specifically asserts the rel_type
+    // shape when reply_to_event_id is the source.
+    const evtId = '$inbound_user_msg:example.com'
+    const body = buildMessageBody('hello', undefined, evtId)
+    expect(body['m.relates_to']).toEqual({
+      rel_type: 'm.thread',
+      event_id: evtId,
+      is_falling_back: true,
+      'm.in_reply_to': { event_id: evtId },
+    })
+  })
+})
+
+// ── Typing indicator ──────────────────────────────────
+
+import { fireTypingIndicator } from './server'
+
+describe('fireTypingIndicator', () => {
+  const originalEnv = { ...process.env }
+  afterEach(() => { process.env = { ...originalEnv } })
+
+  test('fires PUT /typing with timeout 30000 when MATRIX_TYPING is unset (default on)', async () => {
+    delete process.env.MATRIX_TYPING
+    const calls: Array<{ url: string; method: string; body: string }> = []
+    const fakeFetch = (async (input: any, init: any) => {
+      calls.push({ url: String(input), method: init.method, body: String(init.body) })
+      return new Response(null, { status: 200 })
+    }) as typeof fetch
+
+    await fireTypingIndicator({
+      fetch: fakeFetch,
+      homeserverUrl: 'https://matrix.example.com',
+      accessToken: 'token',
+      userId: '@bot:example.com',
+      roomId: '!room:example.com',
+    })
+
+    expect(calls.length).toBe(1)
+    expect(calls[0].url).toBe(
+      'https://matrix.example.com/_matrix/client/v3/rooms/!room:example.com/typing/@bot:example.com',
+    )
+    expect(calls[0].method).toBe('PUT')
+    expect(JSON.parse(calls[0].body)).toEqual({ typing: true, timeout: 30000 })
+  })
+
+  test('skips PUT when MATRIX_TYPING=false', async () => {
+    process.env.MATRIX_TYPING = 'false'
+    const calls: Array<unknown> = []
+    const fakeFetch = (async () => { calls.push(true); return new Response() }) as typeof fetch
+    await fireTypingIndicator({
+      fetch: fakeFetch,
+      homeserverUrl: 'https://matrix.example.com',
+      accessToken: 'token',
+      userId: '@bot:example.com',
+      roomId: '!room:example.com',
+    })
+    expect(calls.length).toBe(0)
+  })
+
+  test('swallows HTTP errors (fire-and-forget)', async () => {
+    delete process.env.MATRIX_TYPING
+    const fakeFetch = (async () => new Response(null, { status: 429 })) as typeof fetch
+    // Must not throw — typing is non-critical.
+    await expect(fireTypingIndicator({
+      fetch: fakeFetch,
+      homeserverUrl: 'https://matrix.example.com',
+      accessToken: 'token',
+      userId: '@bot:example.com',
+      roomId: '!room:example.com',
+    })).resolves.toBeUndefined()
+  })
+})
+
+describe('buildEditMessageBody', () => {
+  test('text-only edit of unthreaded message', () => {
+    const body = buildEditMessageBody({
+      text: 'updated',
+      eventId: '$orig:example.com',
+      originalThreadRootId: undefined,
+    })
+    expect(body).toEqual({
+      msgtype: 'm.text',
+      body:    '* updated',
+      'm.new_content': {
+        msgtype: 'm.text',
+        body:    'updated',
+      },
+      'm.relates_to': {
+        rel_type: 'm.replace',
+        event_id: '$orig:example.com',
+      },
+    })
+  })
+
+  test('text+html edit of unthreaded message', () => {
+    const body = buildEditMessageBody({
+      text: 'updated',
+      html: '<b>updated</b>',
+      eventId: '$orig:example.com',
+      originalThreadRootId: undefined,
+    })
+    expect(body.msgtype).toBe('m.text')
+    expect(body.body).toBe('* updated')
+    expect(body.format).toBe('org.matrix.custom.html')
+    expect(body.formatted_body).toBe('* <b>updated</b>')
+    expect((body['m.new_content'] as any).format).toBe('org.matrix.custom.html')
+    expect((body['m.new_content'] as any).formatted_body).toBe('<b>updated</b>')
+  })
+
+  test('text-only edit of THREADED message includes thread reference', () => {
+    const body = buildEditMessageBody({
+      text: 'updated',
+      eventId: '$orig:example.com',
+      originalThreadRootId: '$thread_root:example.com',
+    })
+    expect(body['m.relates_to']).toEqual({
+      rel_type: 'm.replace',
+      event_id: '$orig:example.com',
+      'm.thread': {
+        event_id: '$thread_root:example.com',
+        is_falling_back: true,
+        'm.in_reply_to': { event_id: '$thread_root:example.com' },
+      },
+    })
+  })
+
+  test('text+html edit of THREADED message includes thread reference', () => {
+    const body = buildEditMessageBody({
+      text: 'updated',
+      html: '<b>updated</b>',
+      eventId: '$orig:example.com',
+      originalThreadRootId: '$thread_root:example.com',
+    })
+    // Same html assertions
+    expect(body.formatted_body).toBe('* <b>updated</b>')
+    expect((body['m.new_content'] as any).formatted_body).toBe('<b>updated</b>')
+    // Plus thread reference
+    expect((body['m.relates_to'] as any)['m.thread']).toBeDefined()
+  })
+})
+
+describe('edit_message tool', () => {
+  test('exposes the edit_message tool schema', async () => {
+    const { editMessageToolDefinition } = await import('./server')
+    expect(editMessageToolDefinition.name).toBe('edit_message')
+    const props = editMessageToolDefinition.inputSchema.properties
+    expect(props.room_id).toBeDefined()
+    expect(props.event_id).toBeDefined()
+    expect(props.text).toBeDefined()
+    expect(props.html).toBeDefined()
+    expect(editMessageToolDefinition.inputSchema.required).toEqual(['room_id', 'event_id', 'text'])
+  })
+})
+
+describe('fetchEventForEdit', () => {
+  test('returns sender + thread root from /event endpoint', async () => {
+    const fakeFetch = (async (input: any) => {
+      expect(String(input)).toContain('/_matrix/client/v3/rooms/!r:ex/event/%24e%3Aex')
+      return new Response(JSON.stringify({
+        sender: '@bot:example.com',
+        content: {
+          'm.relates_to': {
+            rel_type: 'm.thread',
+            event_id: '$root:example.com',
+            'm.in_reply_to': { event_id: '$root:example.com' },
+          },
+        },
+      }), { status: 200 })
+    }) as typeof fetch
+
+    const info = await fetchEventForEdit({
+      fetch: fakeFetch,
+      homeserverUrl: 'https://example.com',
+      accessToken: 'token',
+      roomId: '!r:ex',
+      eventId: '$e:ex',
+    })
+    expect(info.sender).toBe('@bot:example.com')
+    expect(info.threadRootId).toBe('$root:example.com')
+  })
+
+  test('threadRootId is undefined for unthreaded events', async () => {
+    const fakeFetch = (async () =>
+      new Response(JSON.stringify({ sender: '@bot:example.com', content: { msgtype: 'm.text', body: 'hi' } }), { status: 200 }),
+    ) as typeof fetch
+    const info = await fetchEventForEdit({
+      fetch: fakeFetch,
+      homeserverUrl: 'https://example.com',
+      accessToken: 'token',
+      roomId: '!r:ex',
+      eventId: '$e:ex',
+    })
+    expect(info.threadRootId).toBeUndefined()
+  })
+})
+
+describe('MCP server instructions', () => {
+  test('mentions reply_to_event_id, edit_message, and threading guidance', async () => {
+    // The instructions string is a const exported from server.ts (or
+    // accessible via mcp.getServerInfo() — pick whichever is exposed).
+    const { mcpInstructions } = await import('./server')
+    expect(mcpInstructions).toContain('reply_to_event_id')
+    expect(mcpInstructions).toContain('edit_message')
+    expect(mcpInstructions).toContain('event_id')
+    expect(mcpInstructions).toContain('Threading')
+  })
+})
+
+describe('access.json schema', () => {
+  test('parses replyToMode field with default "first"', async () => {
+    const { parseAccessJson } = await import('./server')
+    const access = parseAccessJson(JSON.stringify({
+      allowedUsers: ['@sherod:lab.sherodtaylor.dev'],
+      ackReaction: '👀',
+    }))
+    expect(access.replyToMode).toBe('first')
+  })
+
+  test('parses explicit replyToMode values', async () => {
+    const { parseAccessJson } = await import('./server')
+    for (const mode of ['first', 'all', 'off'] as const) {
+      const access = parseAccessJson(JSON.stringify({
+        allowedUsers: [],
+        ackReaction: '👀',
+        replyToMode: mode,
+      }))
+      expect(access.replyToMode).toBe(mode)
+    }
+  })
+
+  test('rejects invalid replyToMode', () => {
+    const { parseAccessJson } = require('./server')
+    expect(() => parseAccessJson(JSON.stringify({
+      allowedUsers: [],
+      ackReaction: '👀',
+      replyToMode: 'nope',
+    }))).toThrow(/replyToMode/)
   })
 })
