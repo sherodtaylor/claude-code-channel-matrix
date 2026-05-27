@@ -405,6 +405,56 @@ export function buildMessageBody(
   return body
 }
 
+// ── Edit message body ─────────────────────────────────────────────
+//
+// Emits an m.replace event with m.new_content for in-place edits.
+// When the original event was threaded, the replacement also carries
+// an m.thread nested inside m.relates_to so older Element clients
+// render the edit in the correct thread pane.
+
+export interface BuildEditMessageBodyArgs {
+  text:                  string
+  html?:                 string
+  eventId:               string
+  originalThreadRootId?: string
+}
+
+export function buildEditMessageBody(args: BuildEditMessageBodyArgs): Record<string, unknown> {
+  const newContent: Record<string, unknown> = {
+    msgtype: 'm.text',
+    body:    args.text,
+  }
+  if (args.html !== undefined) {
+    newContent.format         = 'org.matrix.custom.html'
+    newContent.formatted_body = args.html
+  }
+
+  const relatesTo: Record<string, unknown> = {
+    rel_type: 'm.replace',
+    event_id: args.eventId,
+  }
+  if (args.originalThreadRootId !== undefined) {
+    relatesTo['m.thread'] = {
+      event_id:        args.originalThreadRootId,
+      is_falling_back: true,
+      'm.in_reply_to': { event_id: args.originalThreadRootId },
+    }
+  }
+
+  const body: Record<string, unknown> = {
+    msgtype: 'm.text',
+    body:    '* ' + args.text,
+    'm.new_content': newContent,
+    'm.relates_to':  relatesTo,
+  }
+  if (args.html !== undefined) {
+    body.format         = 'org.matrix.custom.html'
+    body.formatted_body = '* ' + args.html
+  }
+
+  return body
+}
+
 export function buildReactionBody(eventId: string, emoji: string) {
   return {
     'm.relates_to': {

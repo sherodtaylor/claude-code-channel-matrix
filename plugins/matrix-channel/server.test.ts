@@ -297,6 +297,7 @@ import {
   parseSyncEvents,
   parseSyncInvites,
   buildMessageBody,
+  buildEditMessageBody,
   buildReactionBody,
   buildThreadRootBody,
   nextTxnId,
@@ -1590,5 +1591,73 @@ describe('fireTypingIndicator', () => {
       userId: '@bot:example.com',
       roomId: '!room:example.com',
     })).resolves.toBeUndefined()
+  })
+})
+
+describe('buildEditMessageBody', () => {
+  test('text-only edit of unthreaded message', () => {
+    const body = buildEditMessageBody({
+      text: 'updated',
+      eventId: '$orig:example.com',
+      originalThreadRootId: undefined,
+    })
+    expect(body).toEqual({
+      msgtype: 'm.text',
+      body:    '* updated',
+      'm.new_content': {
+        msgtype: 'm.text',
+        body:    'updated',
+      },
+      'm.relates_to': {
+        rel_type: 'm.replace',
+        event_id: '$orig:example.com',
+      },
+    })
+  })
+
+  test('text+html edit of unthreaded message', () => {
+    const body = buildEditMessageBody({
+      text: 'updated',
+      html: '<b>updated</b>',
+      eventId: '$orig:example.com',
+      originalThreadRootId: undefined,
+    })
+    expect(body.msgtype).toBe('m.text')
+    expect(body.body).toBe('* updated')
+    expect(body.format).toBe('org.matrix.custom.html')
+    expect(body.formatted_body).toBe('* <b>updated</b>')
+    expect((body['m.new_content'] as any).format).toBe('org.matrix.custom.html')
+    expect((body['m.new_content'] as any).formatted_body).toBe('<b>updated</b>')
+  })
+
+  test('text-only edit of THREADED message includes thread reference', () => {
+    const body = buildEditMessageBody({
+      text: 'updated',
+      eventId: '$orig:example.com',
+      originalThreadRootId: '$thread_root:example.com',
+    })
+    expect(body['m.relates_to']).toEqual({
+      rel_type: 'm.replace',
+      event_id: '$orig:example.com',
+      'm.thread': {
+        event_id: '$thread_root:example.com',
+        is_falling_back: true,
+        'm.in_reply_to': { event_id: '$thread_root:example.com' },
+      },
+    })
+  })
+
+  test('text+html edit of THREADED message includes thread reference', () => {
+    const body = buildEditMessageBody({
+      text: 'updated',
+      html: '<b>updated</b>',
+      eventId: '$orig:example.com',
+      originalThreadRootId: '$thread_root:example.com',
+    })
+    // Same html assertions
+    expect(body.formatted_body).toBe('* <b>updated</b>')
+    expect((body['m.new_content'] as any).formatted_body).toBe('<b>updated</b>')
+    // Plus thread reference
+    expect((body['m.relates_to'] as any)['m.thread']).toBeDefined()
   })
 })
