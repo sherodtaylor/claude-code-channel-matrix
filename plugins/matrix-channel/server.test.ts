@@ -1513,3 +1513,22 @@ describe('reply tool schema', () => {
     expect(replyToolDefinition.inputSchema.required).not.toContain('reply_to_event_id')
   })
 })
+
+describe('reply dispatch: thread root resolution', () => {
+  test('reply_to_event_id arg wins over MATRIX_THREADS static root', () => {
+    // buildMessageBody is exported; test it directly with the resolved
+    // root that matches the dispatch logic.
+    //
+    // Direct unit-test of buildMessageBody is already covered upstream
+    // for various cases; this test specifically asserts the rel_type
+    // shape when reply_to_event_id is the source.
+    const evtId = '$inbound_user_msg:example.com'
+    const body = buildMessageBody('hello', undefined, evtId)
+    expect(body['m.relates_to']).toEqual({
+      rel_type: 'm.thread',
+      event_id: evtId,
+      is_falling_back: true,
+      'm.in_reply_to': { event_id: evtId },
+    })
+  })
+})

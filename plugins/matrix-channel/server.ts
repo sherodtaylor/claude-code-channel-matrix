@@ -885,8 +885,12 @@ function createMcpServer(config: Config, threadRootByRoom: Map<string, string>):
         if (!args.room_id || !args.text) {
           return { content: [{ type: 'text', text: 'Missing required arguments: room_id and text' }], isError: true }
         }
-        const threadRootId = threadRootByRoom.get(args.room_id)
-        await matrixReply(config, args.room_id, args.text, args.html, threadRootId)
+        // Per-call reply_to_event_id wins over the static MATRIX_THREADS root.
+        // See docs/superpowers/specs/2026-05-27-matrix-channel-threading-tools-design.md
+        const threadRootId =
+          (args.reply_to_event_id as string | undefined) ??
+          threadRootByRoom.get(args.room_id as string)
+        await matrixReply(config, args.room_id, args.text as string, args.html as string | undefined, threadRootId)
         return { content: [{ type: 'text', text: 'sent' }] }
       }
       case 'react': {
