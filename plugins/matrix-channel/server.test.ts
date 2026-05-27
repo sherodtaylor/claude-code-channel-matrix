@@ -1505,7 +1505,7 @@ describe('processReactions', () => {
 
 // ── Reply tool schema ──────────────────────────────────
 
-import { replyToolDefinition } from './server'
+import { replyToolDefinition, editMessageToolDefinition, fetchEventForEdit } from './server'
 
 describe('reply tool schema', () => {
   test('exposes optional reply_to_event_id parameter', async () => {
@@ -1659,5 +1659,60 @@ describe('buildEditMessageBody', () => {
     expect((body['m.new_content'] as any).formatted_body).toBe('<b>updated</b>')
     // Plus thread reference
     expect((body['m.relates_to'] as any)['m.thread']).toBeDefined()
+  })
+})
+
+describe('edit_message tool', () => {
+  test('exposes the edit_message tool schema', async () => {
+    const { editMessageToolDefinition } = await import('./server')
+    expect(editMessageToolDefinition.name).toBe('edit_message')
+    const props = editMessageToolDefinition.inputSchema.properties
+    expect(props.room_id).toBeDefined()
+    expect(props.event_id).toBeDefined()
+    expect(props.text).toBeDefined()
+    expect(props.html).toBeDefined()
+    expect(editMessageToolDefinition.inputSchema.required).toEqual(['room_id', 'event_id', 'text'])
+  })
+})
+
+describe('fetchEventForEdit', () => {
+  test('returns sender + thread root from /event endpoint', async () => {
+    const fakeFetch = (async (input: any) => {
+      expect(String(input)).toContain('/_matrix/client/v3/rooms/!r:ex/event/%24e%3Aex')
+      return new Response(JSON.stringify({
+        sender: '@bot:example.com',
+        content: {
+          'm.relates_to': {
+            rel_type: 'm.thread',
+            event_id: '$root:example.com',
+            'm.in_reply_to': { event_id: '$root:example.com' },
+          },
+        },
+      }), { status: 200 })
+    }) as typeof fetch
+
+    const info = await fetchEventForEdit({
+      fetch: fakeFetch,
+      homeserverUrl: 'https://example.com',
+      accessToken: 'token',
+      roomId: '!r:ex',
+      eventId: '$e:ex',
+    })
+    expect(info.sender).toBe('@bot:example.com')
+    expect(info.threadRootId).toBe('$root:example.com')
+  })
+
+  test('threadRootId is undefined for unthreaded events', async () => {
+    const fakeFetch = (async () =>
+      new Response(JSON.stringify({ sender: '@bot:example.com', content: { msgtype: 'm.text', body: 'hi' } }), { status: 200 }),
+    ) as typeof fetch
+    const info = await fetchEventForEdit({
+      fetch: fakeFetch,
+      homeserverUrl: 'https://example.com',
+      accessToken: 'token',
+      roomId: '!r:ex',
+      eventId: '$e:ex',
+    })
+    expect(info.threadRootId).toBeUndefined()
   })
 })

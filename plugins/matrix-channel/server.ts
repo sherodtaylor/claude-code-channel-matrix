@@ -455,6 +455,75 @@ export function buildEditMessageBody(args: BuildEditMessageBodyArgs): Record<str
   return body
 }
 
+// ── Edit message tool definition ──────────────────────────────────────────────
+
+export const editMessageToolDefinition = {
+  name: 'edit_message',
+  description:
+    'Edit a prior message authored by this bot. Use for in-place ' +
+    'progress updates that should NOT push-notify the recipient. ' +
+    'Always follow up with a final `reply` to wake the user when done. ' +
+    'Carries both m.replace (the edit) and m.thread (the original ' +
+    "thread membership, if any) so older clients render the edited " +
+    'message in the same thread.',
+  inputSchema: {
+    type: 'object' as const,
+    properties: {
+      room_id:  { type: 'string', description: 'Matrix room ID' },
+      event_id: { type: 'string', description: 'Event ID to edit. Must have been sent by this bot.' },
+      text:     { type: 'string', description: 'New plain-text body.' },
+      html:     { type: 'string', description: 'Optional new HTML body.' },
+    },
+    required: ['room_id', 'event_id', 'text'],
+  },
+} as const
+
+// ── fetchEventForEdit ────────────────────────────────────────────────────────
+
+export interface FetchEventForEditArgs {
+  fetch:         typeof globalThis.fetch
+  homeserverUrl: string
+  accessToken:   string
+  roomId:        string
+  eventId:       string
+}
+
+export interface EventEditInfo {
+  sender:        string
+  threadRootId?: string
+}
+
+export async function fetchEventForEdit(args: FetchEventForEditArgs): Promise<EventEditInfo> {
+  // Room IDs use ! and : which are valid unencoded in URI path segments;
+  // encodeURIComponent would encode the colon, breaking Matrix convention.
+  const encodedRoomId = args.roomId.replace(/[^!:.@a-zA-Z0-9_-]/g, encodeURIComponent)
+  const url =
+    args.homeserverUrl.replace(/\/+$/, '') +
+    `/_matrix/client/v3/rooms/${encodedRoomId}` +
+    `/event/${encodeURIComponent(args.eventId)}`
+
+  const res = await args.fetch(url, {
+    method:  'GET',
+    headers: { Authorization: `Bearer ${args.accessToken}` },
+  })
+  if (!res.ok) {
+    throw new Error(`fetchEventForEdit: HTTP ${res.status} on GET ${url}`)
+  }
+
+  const data = await res.json() as {
+    sender: string
+    content?: { 'm.relates_to'?: { rel_type?: string; event_id?: string } }
+  }
+
+  let threadRootId: string | undefined
+  const relates = data.content?.['m.relates_to']
+  if (relates?.rel_type === 'm.thread' && typeof relates.event_id === 'string') {
+    threadRootId = relates.event_id
+  }
+
+  return { sender: data.sender, threadRootId }
+}
+
 export function buildReactionBody(eventId: string, emoji: string) {
   return {
     'm.relates_to': {
@@ -962,6 +1031,7 @@ function createMcpServer(config: Config, threadRootByRoom: Map<string, string>):
           required: ['room_id', 'event_id', 'emoji'],
         },
       },
+      editMessageToolDefinition,
     ],
   }))
 
@@ -987,6 +1057,49 @@ function createMcpServer(config: Config, threadRootByRoom: Map<string, string>):
         }
         await matrixReact(config, args.room_id, args.event_id, args.emoji)
         return { content: [{ type: 'text', text: 'reacted' }] }
+      }
+      case 'edit_message': {
+        const editArgs = req.params.arguments as {
+          room_id: string
+          event_id: string
+          text: string
+          html?: string
+        }
+
+        // Ownership + thread-state fetch (one round trip, two facts).
+        const info = await fetchEventForEdit({
+          fetch: globalThis.fetch,
+          homeserverUrl: config.homeserverUrl,
+          accessToken:   config.accessToken,
+          roomId:        editArgs.room_id,
+          eventId:       editArgs.event_id,
+        })
+
+        if (info.sender !== config.botUserId) {
+          return {
+            content: [
+              {
+                type: 'text',
+                text: JSON.stringify({
+                  ok: false,
+                  error: 'not_owned_by_bot',
+                  detail: `event ${editArgs.event_id} was sent by ${info.sender}, not ${config.botUserId}`,
+                }),
+              },
+            ],
+          }
+        }
+
+        const body = buildEditMessageBody({
+          text:                 editArgs.text,
+          html:                 editArgs.html,
+          eventId:              editArgs.event_id,
+          originalThreadRootId: info.threadRootId,
+        })
+
+        await matrixSend(config, editArgs.room_id, 'm.room.message', body as Record<string, any>)
+
+        return { content: [{ type: 'text', text: JSON.stringify({ ok: true }) }] }
       }
       default:
         throw new Error(`Unknown tool: ${req.params.name}`)
