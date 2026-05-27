@@ -1728,3 +1728,35 @@ describe('MCP server instructions', () => {
     expect(mcpInstructions).toContain('Threading')
   })
 })
+
+describe('access.json schema', () => {
+  test('parses replyToMode field with default "first"', async () => {
+    const { parseAccessJson } = await import('./server')
+    const access = parseAccessJson(JSON.stringify({
+      allowedUsers: ['@sherod:lab.sherodtaylor.dev'],
+      ackReaction: '👀',
+    }))
+    expect(access.replyToMode).toBe('first')
+  })
+
+  test('parses explicit replyToMode values', async () => {
+    const { parseAccessJson } = await import('./server')
+    for (const mode of ['first', 'all', 'off'] as const) {
+      const access = parseAccessJson(JSON.stringify({
+        allowedUsers: [],
+        ackReaction: '👀',
+        replyToMode: mode,
+      }))
+      expect(access.replyToMode).toBe(mode)
+    }
+  })
+
+  test('rejects invalid replyToMode', () => {
+    const { parseAccessJson } = require('./server')
+    expect(() => parseAccessJson(JSON.stringify({
+      allowedUsers: [],
+      ackReaction: '👀',
+      replyToMode: 'nope',
+    }))).toThrow(/replyToMode/)
+  })
+})

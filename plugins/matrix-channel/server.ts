@@ -29,10 +29,13 @@ export interface Config {
   threadRootRoomId: string | null
 }
 
+export type ReplyToMode = 'first' | 'all' | 'off'
+
 export interface Access {
   allowedUsers: string[]
   ackReaction: string | null
   maxImageSize: number
+  replyToMode: ReplyToMode
 }
 
 // ── Config ─────────────────────────────────────────────
@@ -124,23 +127,47 @@ export function loadConfig(envDir?: string): Config {
   }
 }
 
+// ── Access config ─────────────────────────────────────────────────
+
+export function parseAccessJson(raw: string): Access {
+  const data = JSON.parse(raw) as {
+    allowedUsers?: unknown
+    ackReaction?:  unknown
+    maxImageSize?:  unknown
+    replyToMode?:  unknown
+  }
+
+  const allowedUsers = Array.isArray(data.allowedUsers)
+    ? data.allowedUsers.filter((u): u is string => typeof u === 'string')
+    : []
+
+  const ackReaction = typeof data.ackReaction === 'string' ? data.ackReaction : null
+
+  const maxImageSize = typeof data.maxImageSize === 'number' ? data.maxImageSize : 10 * 1024 * 1024
+
+  let replyToMode: ReplyToMode = 'first'
+  if (data.replyToMode !== undefined) {
+    if (data.replyToMode === 'first' || data.replyToMode === 'all' || data.replyToMode === 'off') {
+      replyToMode = data.replyToMode
+    } else {
+      throw new Error(`invalid replyToMode: ${String(data.replyToMode)} (expected first|all|off)`)
+    }
+  }
+
+  return { allowedUsers, ackReaction, maxImageSize, replyToMode }
+}
+
 export function loadAccess(path?: string): Access {
   const filePath = path ?? join(CHANNELS_DIR, 'access.json')
   if (!existsSync(filePath)) {
-    return { allowedUsers: [], ackReaction: null, maxImageSize: DEFAULT_MAX_IMAGE_SIZE }
+    return { allowedUsers: [], ackReaction: null, maxImageSize: DEFAULT_MAX_IMAGE_SIZE, replyToMode: 'first' }
   }
-  let raw: any
   try {
-    raw = JSON.parse(readFileSync(filePath, 'utf-8'))
+    return parseAccessJson(readFileSync(filePath, 'utf-8'))
   } catch (err) {
     console.error(`Failed to parse ${filePath}: ${err instanceof Error ? err.message : err}`)
     console.error('Falling back to default access config (no allowed users)')
-    return { allowedUsers: [], ackReaction: null, maxImageSize: DEFAULT_MAX_IMAGE_SIZE }
-  }
-  return {
-    allowedUsers: Array.isArray(raw.allowedUsers) ? raw.allowedUsers : [],
-    ackReaction: raw.ackReaction ?? null,
-    maxImageSize: typeof raw.maxImageSize === 'number' ? raw.maxImageSize : 10 * 1024 * 1024,
+    return { allowedUsers: [], ackReaction: null, maxImageSize: DEFAULT_MAX_IMAGE_SIZE, replyToMode: 'first' }
   }
 }
 
