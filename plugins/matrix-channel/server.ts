@@ -787,6 +787,38 @@ async function relayPermissionRequest(
   )
 }
 
+// ── Reply tool ────────────────────────────────────────
+//
+// `reply_to_event_id` (new in this PR) routes the message into a
+// thread rooted under that event. When set, the outgoing message
+// carries rel_type: m.thread + is_falling_back: true +
+// m.in_reply_to so unthreaded clients (FluffyChat) still see it.
+// Omit to post top-level.
+
+export const replyToolDefinition = {
+  name: 'reply',
+  description: 'Send a message to a Matrix room',
+  inputSchema: {
+    type: 'object' as const,
+    properties: {
+      room_id: { type: 'string', description: 'Matrix room ID, e.g. !abc:example.com' },
+      text:    { type: 'string', description: 'Plain-text body' },
+      html:    { type: 'string', description: 'Optional HTML body' },
+      reply_to_event_id: {
+        type: 'string',
+        description:
+          'Event ID to thread under. When set, the message is sent as a ' +
+          'threaded reply (rel_type: m.thread) with proper m.in_reply_to ' +
+          'fallback so unthreaded clients still see it. Use this for ' +
+          'follow-ups, intermediate progress posts, and anything that ' +
+          'should land under the originating user message rather than ' +
+          'cluttering the room top-level. Omit to post top-level.',
+      },
+    },
+    required: ['room_id', 'text'],
+  },
+} as const
+
 // ── MCP Server ─────────────────────────────────────────
 
 function createMcpServer(config: Config, threadRootByRoom: Map<string, string>): Server {
@@ -828,19 +860,7 @@ function createMcpServer(config: Config, threadRootByRoom: Map<string, string>):
 
   mcp.setRequestHandler(ListToolsRequestSchema, async () => ({
     tools: [
-      {
-        name: 'reply',
-        description: 'Send a message to a Matrix room',
-        inputSchema: {
-          type: 'object' as const,
-          properties: {
-            room_id: { type: 'string', description: 'The room to send to (from channel tag)' },
-            text: { type: 'string', description: 'Plain text message' },
-            html: { type: 'string', description: 'Optional HTML-formatted message' },
-          },
-          required: ['room_id', 'text'],
-        },
-      },
+      replyToolDefinition,
       {
         name: 'react',
         description: 'React to a message with an emoji',

@@ -1501,3 +1501,15 @@ describe('processReactions', () => {
     expect(calls[0]?.params.behavior).toBe('allow')
   })
 })
+
+// ── Reply tool schema ──────────────────────────────────
+
+import { replyToolDefinition } from './server'
+
+describe('reply tool schema', () => {
+  test('exposes optional reply_to_event_id parameter', async () => {
+    expect(replyToolDefinition.inputSchema.properties.reply_to_event_id).toBeDefined()
+    expect(replyToolDefinition.inputSchema.properties.reply_to_event_id.type).toBe('string')
+    expect(replyToolDefinition.inputSchema.required).not.toContain('reply_to_event_id')
+  })
+})
