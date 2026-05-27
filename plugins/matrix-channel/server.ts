@@ -978,6 +978,29 @@ export const replyToolDefinition = {
 
 // ── MCP Server ─────────────────────────────────────────
 
+export const mcpInstructions = [
+  'Messages arrive as <channel source="matrix" room_id="..." event_id="..."',
+  'sender="..." room_name="...">. To respond:',
+  '',
+  '  • Call `reply(room_id, text)` for a top-level message in the room.',
+  '  • Call `reply(room_id, text, reply_to_event_id=<inbound event_id>)` to',
+  "    thread the response under the user's message. Use this for any",
+  '    follow-up after the initial response — keeps the room uncluttered.',
+  '  • Call `edit_message(room_id, event_id, text)` to update a prior',
+  '    message you sent in-place, e.g. interim "still working — step 3 of',
+  '    5" status. Edits do NOT generate push notifications, so ALWAYS',
+  '    follow up with a final new `reply` to wake the user when work',
+  '    completes. The bot can only edit its own messages.',
+  '  • Call `react(room_id, event_id, emoji)` for lightweight status',
+  '    signals (👀 received, ✅ done, ❌ failed).',
+  '',
+  'Threading is per-call: pass `reply_to_event_id` on each reply that',
+  'should land in the thread. The plugin does NOT auto-thread; if you omit',
+  'the parameter, the message posts top-level. Read the inbound',
+  '`event_id` from the <channel> tag and use it as the thread root for',
+  'any narration that follows.',
+].join('\n')
+
 function createMcpServer(config: Config, threadRootByRoom: Map<string, string>): Server {
   const mcp = new Server(
     { name: 'matrix', version: '0.6.0' },
@@ -989,11 +1012,7 @@ function createMcpServer(config: Config, threadRootByRoom: Map<string, string>):
         },
         tools: {},
       },
-      instructions:
-        'Messages arrive as <channel source="matrix" room_id="!abc:domain" room_name="General" sender="@user:domain" event_id="$evt:domain">. ' +
-        'Reply with the reply tool (pass room_id). React with the react tool (pass room_id, event_id, emoji). ' +
-        'When a message contains an image file path, use the Read tool to view it before responding. ' +
-        'Threading is handled automatically - replies are routed to the correct thread.',
+      instructions: mcpInstructions,
     },
   )
 

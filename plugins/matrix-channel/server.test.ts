@@ -1716,3 +1716,15 @@ describe('fetchEventForEdit', () => {
     expect(info.threadRootId).toBeUndefined()
   })
 })
+
+describe('MCP server instructions', () => {
+  test('mentions reply_to_event_id, edit_message, and threading guidance', async () => {
+    // The instructions string is a const exported from server.ts (or
+    // accessible via mcp.getServerInfo() — pick whichever is exposed).
+    const { mcpInstructions } = await import('./server')
+    expect(mcpInstructions).toContain('reply_to_event_id')
+    expect(mcpInstructions).toContain('edit_message')
+    expect(mcpInstructions).toContain('event_id')
+    expect(mcpInstructions).toContain('Threading')
+  })
+})
