@@ -610,16 +610,16 @@ describe('parseSyncInvites', () => {
 })
 
 describe('buildMessageBody', () => {
-  test('builds plain text m.notice body', () => {
+  test('builds plain text m.text body', () => {
     const body = buildMessageBody('hello', undefined)
-    expect(body.msgtype).toBe('m.notice')
+    expect(body.msgtype).toBe('m.text')
     expect(body.body).toBe('hello')
     expect(body.format).toBeUndefined()
   })
 
-  test('builds HTML m.notice body', () => {
+  test('builds HTML m.text body', () => {
     const body = buildMessageBody('hello', '<b>hello</b>')
-    expect(body.msgtype).toBe('m.notice')
+    expect(body.msgtype).toBe('m.text')
     expect(body.body).toBe('hello')
     expect(body.format).toBe('org.matrix.custom.html')
     expect(body.formatted_body).toBe('<b>hello</b>')
