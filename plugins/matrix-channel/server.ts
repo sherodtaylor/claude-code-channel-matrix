@@ -503,13 +503,12 @@ export function buildMessageBody(
   text: string,
   html: string | undefined,
   threadRootId?: string,
+  msgtype: 'm.text' | 'm.notice' = 'm.text',
 ): Record<string, any> {
-  // m.text, not m.notice — some Matrix clients filter or hide notice events,
-  // which made bot replies "disappear" even though the homeserver accepted
-  // them. Bot loop prevention is already handled by shouldForwardEvent
-  // skipping events whose sender == botUserId, so the spec's rationale for
-  // m.notice doesn't apply.
-  const body: Record<string, any> = { msgtype: 'm.text', body: text }
+  // msgtype defaults to m.text (loud, push-notifies). The reply routing
+  // helper passes m.notice for threaded follow-ups so quiet narration
+  // doesn't ring a phone for every progress update.
+  const body: Record<string, any> = { msgtype, body: text }
   if (html) {
     body.format = 'org.matrix.custom.html'
     body.formatted_body = html

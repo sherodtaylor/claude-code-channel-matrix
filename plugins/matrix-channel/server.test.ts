@@ -627,6 +627,27 @@ describe('buildMessageBody', () => {
     expect(body.format).toBe('org.matrix.custom.html')
     expect(body.formatted_body).toBe('<b>hello</b>')
   })
+
+  test('uses m.notice when explicitly requested', () => {
+    const body = buildMessageBody('hello', undefined, undefined, 'm.notice')
+    expect(body.msgtype).toBe('m.notice')
+  })
+
+  test('defaults to m.text when msgtype is omitted (backwards compat)', () => {
+    const body = buildMessageBody('hello', undefined, undefined)
+    expect(body.msgtype).toBe('m.text')
+  })
+
+  test('uses m.notice with thread root', () => {
+    const body = buildMessageBody('hello', undefined, '$root1', 'm.notice')
+    expect(body.msgtype).toBe('m.notice')
+    expect(body['m.relates_to']).toEqual({
+      rel_type: 'm.thread',
+      event_id: '$root1',
+      is_falling_back: true,
+      'm.in_reply_to': { event_id: '$root1' },
+    })
+  })
 })
 
 describe('buildMessageBody with threads', () => {
