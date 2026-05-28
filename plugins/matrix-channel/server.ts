@@ -208,6 +208,57 @@ export function sweepIdleReplyRoutingEntries(
   }
 }
 
+/** Outcome of a reply routing decision. */
+export interface ReplyRoutingDecision {
+  route:        'top' | 'threaded'
+  msgtype:      'm.text' | 'm.notice'
+  threadRootId?: string
+}
+
+export interface DecideReplyRoutingArgs {
+  reply_to_event_id: string | undefined
+  force_top_level:   boolean | undefined
+}
+
+/**
+ * Decide how the next outgoing reply should be wired:
+ *  - First reply per inbound event_id → top-level (m.text)
+ *  - Subsequent replies → threaded under that event (m.notice)
+ *  - force_top_level: true → top-level + delete the entry (resets cycle)
+ *  - No reply_to_event_id → top-level (and force_top_level is ignored)
+ *
+ * Sweeps idle entries before reading the map.
+ * Mutates the map (sets/refreshes/deletes entries) in place.
+ */
+export function decideReplyRouting(
+  args: DecideReplyRoutingArgs,
+  map:  Map<string, ReplyRoutingEntry>,
+  now:  number,
+): ReplyRoutingDecision {
+  sweepIdleReplyRoutingEntries(map, now)
+
+  if (!args.reply_to_event_id) {
+    return { route: 'top', msgtype: 'm.text' }
+  }
+
+  if (args.force_top_level === true) {
+    map.delete(args.reply_to_event_id)
+    return { route: 'top', msgtype: 'm.text' }
+  }
+
+  if (map.has(args.reply_to_event_id)) {
+    map.set(args.reply_to_event_id, { lastReplyAt: now })
+    return {
+      route:        'threaded',
+      msgtype:      'm.notice',
+      threadRootId: args.reply_to_event_id,
+    }
+  }
+
+  map.set(args.reply_to_event_id, { lastReplyAt: now })
+  return { route: 'top', msgtype: 'm.text' }
+}
+
 // ── Thread Root Persistence ──────────────────────────────
 
 /** Thread roots are stored as { "roomId:project": "$eventId" }. */

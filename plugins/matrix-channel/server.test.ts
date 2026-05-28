@@ -18,6 +18,7 @@ import {
   type ReactionEvent,
   sweepIdleReplyRoutingEntries,
   REPLY_ROUTING_IDLE_TTL_MS,
+  decideReplyRouting,
 } from './server'
 import { existsSync, rmSync, mkdirSync, writeFileSync } from 'node:fs'
 
@@ -682,6 +683,151 @@ describe('sweepIdleReplyRoutingEntries', () => {
     const map = new Map<string, { lastReplyAt: number }>()
     sweepIdleReplyRoutingEntries(map, 10_000_000)
     expect(map.size).toBe(0)
+  })
+})
+
+describe('decideReplyRouting', () => {
+  test('no reply_to_event_id → top-level, m.text, map untouched', () => {
+    const map = new Map<string, { lastReplyAt: number }>()
+    const decision = decideReplyRouting(
+      { reply_to_event_id: undefined, force_top_level: undefined },
+      map,
+      10_000_000,
+    )
+    expect(decision).toEqual({ route: 'top', msgtype: 'm.text' })
+    expect(map.size).toBe(0)
+  })
+
+  test('first call with reply_to_event_id → top, m.text, map gains entry', () => {
+    const map = new Map<string, { lastReplyAt: number }>()
+    const decision = decideReplyRouting(
+      { reply_to_event_id: '$X', force_top_level: undefined },
+      map,
+      10_000_000,
+    )
+    expect(decision).toEqual({ route: 'top', msgtype: 'm.text' })
+    expect(map.get('$X')).toEqual({ lastReplyAt: 10_000_000 })
+  })
+
+  test('second call with same reply_to_event_id → threaded, m.notice, entry refreshed', () => {
+    const now = 10_000_000
+    const map = new Map<string, { lastReplyAt: number }>([
+      ['$X', { lastReplyAt: now - 60_000 }],  // 1 min ago, well within TTL
+    ])
+    const decision = decideReplyRouting(
+      { reply_to_event_id: '$X', force_top_level: undefined },
+      map,
+      now,
+    )
+    expect(decision).toEqual({
+      route: 'threaded',
+      msgtype: 'm.notice',
+      threadRootId: '$X',
+    })
+    expect(map.get('$X')).toEqual({ lastReplyAt: now })  // refreshed
+  })
+
+  test('idle TTL expiry resets routing back to top-level', () => {
+    const now = 10_000_000
+    const map = new Map<string, { lastReplyAt: number }>([
+      ['$X', { lastReplyAt: now - REPLY_ROUTING_IDLE_TTL_MS - 1 }],
+    ])
+    const decision = decideReplyRouting(
+      { reply_to_event_id: '$X', force_top_level: undefined },
+      map,
+      now,
+    )
+    expect(decision).toEqual({ route: 'top', msgtype: 'm.text' })
+    expect(map.get('$X')).toEqual({ lastReplyAt: now })  // fresh entry
+  })
+
+  test('active conversation does not expire mid-stream (idle TTL refreshed each reply)', () => {
+    const map = new Map<string, { lastReplyAt: number }>()
+    let now = 10_000_000
+    // First reply → top
+    decideReplyRouting({ reply_to_event_id: '$X', force_top_level: undefined }, map, now)
+    // 8 follow-up replies, 90s apart (12 min total) — each refreshes the entry
+    for (let i = 0; i < 8; i++) {
+      now += 90_000  // 90 seconds
+      const d = decideReplyRouting({ reply_to_event_id: '$X', force_top_level: undefined }, map, now)
+      expect(d.route).toBe('threaded')
+      expect(d.msgtype).toBe('m.notice')
+    }
+    expect(map.get('$X')?.lastReplyAt).toBe(now)
+  })
+
+  test('force_top_level=true posts top-level and deletes the entry', () => {
+    const now = 10_000_000
+    const map = new Map<string, { lastReplyAt: number }>([
+      ['$X', { lastReplyAt: now - 60_000 }],  // 1 min ago, well within TTL
+    ])
+    const decision = decideReplyRouting(
+      { reply_to_event_id: '$X', force_top_level: true },
+      map,
+      now,
+    )
+    expect(decision).toEqual({ route: 'top', msgtype: 'm.text' })
+    expect(map.has('$X')).toBe(false)
+  })
+
+  test('force_top_level reset → follow-up reply routes as fresh first', () => {
+    const now = 10_000_000
+    const map = new Map<string, { lastReplyAt: number }>([
+      ['$X', { lastReplyAt: now - 60_000 }],  // 1 min ago, well within TTL
+    ])
+    decideReplyRouting({ reply_to_event_id: '$X', force_top_level: true }, map, now)
+    const d2 = decideReplyRouting(
+      { reply_to_event_id: '$X', force_top_level: undefined },
+      map,
+      now + 1,
+    )
+    expect(d2.route).toBe('top')
+    expect(map.get('$X')?.lastReplyAt).toBe(now + 1)
+  })
+
+  test('independent inbound events do not share state', () => {
+    const now = 10_000_000
+    const map = new Map<string, { lastReplyAt: number }>([
+      ['$X', { lastReplyAt: now - 60_000 }],  // 1 min ago, well within TTL
+    ])
+    const decision = decideReplyRouting(
+      { reply_to_event_id: '$Y', force_top_level: undefined },
+      map,
+      now,
+    )
+    expect(decision.route).toBe('top')
+    expect(map.has('$X')).toBe(true)
+    expect(map.has('$Y')).toBe(true)
+  })
+
+  test('sweeps idle entries on each call, keeps fresh', () => {
+    const now = 10_000_000
+    const map = new Map<string, { lastReplyAt: number }>([
+      ['$X', { lastReplyAt: now - REPLY_ROUTING_IDLE_TTL_MS - 1 }],  // idle
+      ['$Y', { lastReplyAt: now - 120_000 }],  // 2 min ago, fresh
+    ])
+    decideReplyRouting(
+      { reply_to_event_id: '$Z', force_top_level: undefined },
+      map,
+      now,
+    )
+    expect(map.has('$X')).toBe(false)  // swept
+    expect(map.has('$Y')).toBe(true)   // kept
+    expect(map.has('$Z')).toBe(true)   // gained
+  })
+
+  test('force_top_level without reply_to_event_id behaves as plain top-level (ignored, no map mutation)', () => {
+    const now = 10_000_000
+    const map = new Map<string, { lastReplyAt: number }>([
+      ['$X', { lastReplyAt: now - 60_000 }],  // 1 min ago, well within TTL
+    ])
+    const decision = decideReplyRouting(
+      { reply_to_event_id: undefined, force_top_level: true },
+      map,
+      now,
+    )
+    expect(decision).toEqual({ route: 'top', msgtype: 'm.text' })
+    expect(map.has('$X')).toBe(true)  // untouched
   })
 })
 
