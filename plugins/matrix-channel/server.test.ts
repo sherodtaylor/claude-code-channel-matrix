@@ -1760,3 +1760,56 @@ describe('access.json schema', () => {
     }))).toThrow(/replyToMode/)
   })
 })
+
+describe('messageTargetsBot', () => {
+  const { messageTargetsBot } = require('./server')
+  const botId = '@devbot:lab.sherodtaylor.dev'
+
+  test('matches full Matrix ID', () => {
+    expect(messageTargetsBot('ping @devbot:lab.sherodtaylor.dev please', botId)).toBe(true)
+  })
+
+  test('matches bare localpart', () => {
+    expect(messageTargetsBot('devbot hello', botId)).toBe(true)
+  })
+
+  test('matches @-prefixed localpart', () => {
+    expect(messageTargetsBot('@devbot can you check this', botId)).toBe(true)
+  })
+
+  test('matches case-insensitive', () => {
+    expect(messageTargetsBot('Hey DevBot', botId)).toBe(true)
+  })
+
+  test('matches Matrix display-name link with emoji suffix', () => {
+    const body = '[devbot 💕](https://matrix.to/#/@devbot:lab.sherodtaylor.dev) review please'
+    expect(messageTargetsBot(body, botId)).toBe(true)
+  })
+
+  test('matches with trailing punctuation', () => {
+    expect(messageTargetsBot('devbot, are you there?', botId)).toBe(true)
+    expect(messageTargetsBot("devbot's report is ready", botId)).toBe(true)
+  })
+
+  test('does not match a different agent name', () => {
+    expect(messageTargetsBot('infrabot can you take this', botId)).toBe(false)
+    expect(messageTargetsBot('@infrabot:lab.sherodtaylor.dev hello', botId)).toBe(false)
+  })
+
+  test('does not match localpart inside another word', () => {
+    expect(messageTargetsBot('the devbots are coming', botId)).toBe(false)
+    expect(messageTargetsBot('predevbot test', botId)).toBe(false)
+  })
+
+  test('returns false for empty body', () => {
+    expect(messageTargetsBot('', botId)).toBe(false)
+  })
+
+  test('returns false for empty botUserId', () => {
+    expect(messageTargetsBot('devbot hello', '')).toBe(false)
+  })
+
+  test('handles botUserId without leading @', () => {
+    expect(messageTargetsBot('devbot hello', 'devbot:lab.sherodtaylor.dev')).toBe(true)
+  })
+})
