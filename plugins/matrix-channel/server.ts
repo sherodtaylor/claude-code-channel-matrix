@@ -802,6 +802,28 @@ async function matrixSend(
 //
 // MATRIX_TYPING=false disables. Default: on.
 
+// messageTargetsBot returns true if `body` looks addressed to the bot
+// identified by `botUserId`. Matches the full Matrix ID (e.g.
+// `@devbot:host.tld`) or the localpart as a delimited token
+// (`devbot`, `DevBot`, `@devbot`, `[devbot 💕](...)`, `devbot,` etc.).
+// Used to gate the typing indicator so we don't broadcast "thinking..."
+// for messages aimed at a different agent in the same room.
+export function messageTargetsBot(body: string, botUserId: string): boolean {
+  if (!body || !botUserId) return false
+  if (body.includes(botUserId)) return true
+  const localpart = botUserId.split(':')[0].replace(/^@/, '')
+  if (!localpart) return false
+  const re = new RegExp(
+    `(^|[^A-Za-z0-9_])${escapeRegExp(localpart)}([^A-Za-z0-9_]|$)`,
+    'i',
+  )
+  return re.test(body)
+}
+
+function escapeRegExp(s: string): string {
+  return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+}
+
 export interface FireTypingArgs {
   fetch:         typeof globalThis.fetch
   homeserverUrl: string
@@ -1242,14 +1264,18 @@ export async function processEvents(
 
     lastActiveRoomState.roomId = event.roomId
 
-    // Fire typing indicator (best-effort; gated by MATRIX_TYPING env).
-    void fireTypingIndicator({
-      fetch: globalThis.fetch,
-      homeserverUrl: config.homeserverUrl,
-      accessToken:   config.accessToken,
-      userId:        config.botUserId,
-      roomId:        event.roomId,
-    })
+    // Fire typing indicator only when the message looks addressed to us —
+    // showing "thinking..." for messages aimed at other agents in the room
+    // is misleading. Best-effort; gated by MATRIX_TYPING env as well.
+    if (messageTargetsBot(content, config.botUserId)) {
+      void fireTypingIndicator({
+        fetch: globalThis.fetch,
+        homeserverUrl: config.homeserverUrl,
+        accessToken:   config.accessToken,
+        userId:        config.botUserId,
+        roomId:        event.roomId,
+      })
+    }
 
     await mcp.notification({
       method: 'notifications/claude/channel',
