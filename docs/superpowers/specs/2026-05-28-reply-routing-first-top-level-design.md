@@ -59,21 +59,24 @@ A single in-process Map kept on the server module scope:
 
 ```typescript
 interface ReplyRoutingEntry {
-  firstReplyAt: number  // epoch ms; used for TTL sweep
+  lastReplyAt: number  // epoch ms; refreshed on every reply that uses this entry
 }
 const replyRoutingState = new Map<string, ReplyRoutingEntry>()
-const REPLY_ROUTING_TTL_MS = 10 * 60 * 1000  // 10 min
+const REPLY_ROUTING_IDLE_TTL_MS = 10 * 60 * 1000  // 10 min of idle time
 ```
 
 Key = the inbound event ID (`reply_to_event_id` argument). Value records
-the timestamp at which the bot first replied to that event.
+the timestamp at which the bot last replied to that event. **Idle TTL,
+not creation TTL** — every reply (first or threaded) updates `lastReplyAt`,
+so an actively-threading conversation never gets cut off mid-stream. The
+10-min window starts ticking after the bot stops replying.
 
 ### TTL sweep
 
-On every `reply` call we lazily sweep entries whose `firstReplyAt` is
-older than `REPLY_ROUTING_TTL_MS`. No background timer — the map is
-expected to stay small (one entry per active conversation in the last
-~10 min).
+On every `reply` call we lazily sweep entries whose `lastReplyAt` is
+older than `REPLY_ROUTING_IDLE_TTL_MS`. No background timer — the map
+is expected to stay small (one entry per conversation active in the
+last ~10 min of bot replies).
 
 ### Routing decision
 
@@ -89,9 +92,10 @@ Inside the `reply` tool handler:
      delete map entry for reply_to_event_id
 3. Else if map has an entry for reply_to_event_id (after TTL sweep):
      route = THREADED under reply_to_event_id, msgtype = 'm.notice'
+     refresh map entry { lastReplyAt: now }
 4. Else:
      route = TOP_LEVEL, msgtype = 'm.text'
-     set map entry { firstReplyAt: now }
+     set map entry { lastReplyAt: now }
 ```
 
 ### Wire format
@@ -165,12 +169,20 @@ New tests in `server.test.ts` (`bun test`):
      `is_falling_back=true`,
      `msgtype=m.notice`.
 
-4. **TTL expiry resets routing.**
-   - Setup: map has entry for `$X` with `firstReplyAt` older than
-     `REPLY_ROUTING_TTL_MS`.
+4. **Idle TTL expiry resets routing.**
+   - Setup: map has entry for `$X` with `lastReplyAt` older than
+     `REPLY_ROUTING_IDLE_TTL_MS` (e.g. 11 min idle).
    - Call: `reply(room_id, text, reply_to_event_id=$X)`.
    - Assert: routes as fresh first call (top-level, `m.text`),
-     `firstReplyAt` updated to now.
+     `lastReplyAt` updated to now.
+
+4b. **Active conversation does not expire mid-stream.**
+   - Setup: map has entry for `$X`; simulate 8 minutes of activity
+     with periodic threaded replies (each refreshes `lastReplyAt`),
+     then a final reply at the 12-min mark from the original first
+     reply.
+   - Assert: all replies after the first stay threaded `m.notice`
+     under `$X`; no top-level "fresh first" surfaces.
 
 5. **`force_top_level=true` posts top-level and resets routing.**
    - Setup: map has entry for `$X`.
@@ -184,8 +196,9 @@ New tests in `server.test.ts` (`bun test`):
    - Call: `reply(room_id, text, reply_to_event_id=$Y)`.
    - Assert: top-level (first for `$Y`), map now has both `$X` and `$Y`.
 
-7. **TTL sweep removes only expired entries.**
-   - Setup: map has `$X` expired and `$Y` fresh.
+7. **TTL sweep removes only idle entries.**
+   - Setup: map has `$X` with `lastReplyAt` 11 min ago (idle), and `$Y`
+     with `lastReplyAt` 2 min ago (fresh).
    - Call: `reply(room_id, text, reply_to_event_id=$Z)`.
    - Assert: map no longer contains `$X`, still contains `$Y`,
      gained `$Z`.
@@ -193,6 +206,8 @@ New tests in `server.test.ts` (`bun test`):
 8. **Tool schema exposes `force_top_level: boolean`.**
    - Assert: `replyToolDefinition.inputSchema.properties.force_top_level`
      exists and has `type: 'boolean'`.
+   - Description text must note: "no-op when `reply_to_event_id` is
+     absent (top-level is already the default)".
 
 For deterministic testing, the time source (`Date.now`) is injected via
 an optional `now: () => number` parameter on the helper that performs
