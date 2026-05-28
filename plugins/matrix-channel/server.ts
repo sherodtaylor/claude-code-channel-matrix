@@ -1094,15 +1094,17 @@ function createMcpServer(config: Config, threadRootByRoom: Map<string, string>):
         const threadRootId =
           (args.reply_to_event_id as string | undefined) ??
           threadRootByRoom.get(args.room_id as string)
-        await matrixReply(config, args.room_id, args.text as string, args.html as string | undefined, threadRootId)
-        return { content: [{ type: 'text', text: 'sent' }] }
+        const eventId = await matrixReply(config, args.room_id, args.text as string, args.html as string | undefined, threadRootId)
+        // Echo the message body in the result so transcript / UI surfaces show
+        // what was actually sent — a bare "sent" leaves the caller blind.
+        return { content: [{ type: 'text', text: JSON.stringify({ ok: true, event_id: eventId, text: args.text }) }] }
       }
       case 'react': {
         if (!args.room_id || !args.event_id || !args.emoji) {
           return { content: [{ type: 'text', text: 'Missing required arguments: room_id, event_id, and emoji' }], isError: true }
         }
-        await matrixReact(config, args.room_id, args.event_id, args.emoji)
-        return { content: [{ type: 'text', text: 'reacted' }] }
+        const eventId = await matrixReact(config, args.room_id, args.event_id, args.emoji)
+        return { content: [{ type: 'text', text: JSON.stringify({ ok: true, event_id: eventId, emoji: args.emoji, target_event_id: args.event_id }) }] }
       }
       case 'edit_message': {
         const editArgs = req.params.arguments as {
