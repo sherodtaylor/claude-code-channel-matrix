@@ -16,6 +16,8 @@ import {
   ALLOW_EMOJI,
   DENY_EMOJI,
   type ReactionEvent,
+  sweepIdleReplyRoutingEntries,
+  REPLY_ROUTING_IDLE_TTL_MS,
 } from './server'
 import { existsSync, rmSync, mkdirSync, writeFileSync } from 'node:fs'
 
@@ -652,6 +654,34 @@ describe('buildMessageBody with threads', () => {
       is_falling_back: true,
       'm.in_reply_to': { event_id: '$root1' },
     })
+  })
+})
+
+describe('sweepIdleReplyRoutingEntries', () => {
+  test('removes entries older than REPLY_ROUTING_IDLE_TTL_MS', () => {
+    const now = 10_000_000
+    const map = new Map<string, { lastReplyAt: number }>([
+      ['$idle', { lastReplyAt: now - REPLY_ROUTING_IDLE_TTL_MS - 1 }],
+      ['$fresh', { lastReplyAt: now - 60_000 }],
+    ])
+    sweepIdleReplyRoutingEntries(map, now)
+    expect(map.has('$idle')).toBe(false)
+    expect(map.has('$fresh')).toBe(true)
+  })
+
+  test('keeps entries exactly at the TTL boundary', () => {
+    const now = 10_000_000
+    const map = new Map<string, { lastReplyAt: number }>([
+      ['$boundary', { lastReplyAt: now - REPLY_ROUTING_IDLE_TTL_MS }],
+    ])
+    sweepIdleReplyRoutingEntries(map, now)
+    expect(map.has('$boundary')).toBe(true)
+  })
+
+  test('empty map is a no-op', () => {
+    const map = new Map<string, { lastReplyAt: number }>()
+    sweepIdleReplyRoutingEntries(map, 10_000_000)
+    expect(map.size).toBe(0)
   })
 })
 

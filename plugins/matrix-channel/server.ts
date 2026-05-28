@@ -171,6 +171,43 @@ export function loadAccess(path?: string): Access {
   }
 }
 
+// ── Reply Routing State ───────────────────────────────────────────────
+//
+// The `reply` tool tracks, per inbound user event_id, whether the bot has
+// already replied to it inside this process. The first reply per event_id
+// posts top-level (loud m.text wake-up); subsequent replies thread under
+// the inbound event (quiet m.notice narration). State is per-process; a
+// restart drops it (acceptable — matches the "session ended" UX).
+//
+// Idle TTL, not creation TTL: every reply that uses an entry refreshes
+// lastReplyAt, so an actively-threading conversation never expires
+// mid-stream. The TTL window only starts when the bot stops replying.
+
+export interface ReplyRoutingEntry {
+  lastReplyAt: number  // epoch ms
+}
+
+export const REPLY_ROUTING_IDLE_TTL_MS = 10 * 60 * 1000  // 10 min
+
+export const replyRoutingState = new Map<string, ReplyRoutingEntry>()
+
+/** Test-only: clear the module-scope routing state. */
+export function __resetReplyRoutingForTest(): void {
+  replyRoutingState.clear()
+}
+
+/** Drop entries whose lastReplyAt is older than the idle TTL window. */
+export function sweepIdleReplyRoutingEntries(
+  map: Map<string, ReplyRoutingEntry>,
+  now: number,
+): void {
+  for (const [eventId, entry] of map) {
+    if (now - entry.lastReplyAt > REPLY_ROUTING_IDLE_TTL_MS) {
+      map.delete(eventId)
+    }
+  }
+}
+
 // ── Thread Root Persistence ──────────────────────────────
 
 /** Thread roots are stored as { "roomId:project": "$eventId" }. */
