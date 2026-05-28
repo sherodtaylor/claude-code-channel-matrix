@@ -14,36 +14,61 @@ This skill is a deeper reference for the routing rules summarized in
 the plugin's MCP `instructions` field. Use it when debugging unexpected
 client rendering or when planning multi-step narration in a Matrix room.
 
-## How a thread gets created
+## How replies are routed
 
-Every inbound `<channel source="matrix" ...>` tag carries an `event_id`
-attribute — the Matrix event ID of the user message that triggered this
-turn. To respond inside a thread, pass that `event_id` as
-`reply_to_event_id` on every `reply` call after (and optionally
-including) your first one:
+The plugin auto-routes replies based on `reply_to_event_id`:
+
+- **First reply per inbound `event_id`** → posts top-level in the room
+  (no `m.relates_to`), `msgtype: m.text`. Loud wake-up.
+- **Subsequent replies with the same `reply_to_event_id`** → threaded
+  under that event (`m.relates_to.rel_type: m.thread`, `event_id`
+  pointing at the user's inbound event), `msgtype: m.notice`. Quiet
+  narration.
+- **No `reply_to_event_id`** → top-level, `m.text`. No routing state
+  touched.
+
+State is per-process with a 10-min idle TTL — every reply for an event
+refreshes the entry, so an actively-threading conversation never
+expires mid-stream. A plugin restart drops the map.
+
+### How to use it from your agent
+
+Pass the inbound user `event_id` as `reply_to_event_id` on **every**
+reply. The plugin handles the first-vs-subsequent distinction for you.
 
 ```
 reply(
   room_id = "!abc:example.com",
-  text    = "intermediate status…",
+  text    = "...",
   reply_to_event_id = "$user_message:example.com",  // from inbound <channel> tag
 )
 ```
 
-The plugin emits the message with `rel_type: m.thread`, `is_falling_back: true`,
-and a nested `m.in_reply_to` so thread-unaware clients (FluffyChat) still
-see the message as a normal in-line reply.
+You no longer track turn state yourself. The first reply you make per
+inbound event becomes the loud top-level wake-up; everything after is
+quiet threaded narration.
 
-## When to thread
+### Forcing a fresh wake-up: `force_top_level: true`
 
-- **Initial response**: post top-level in the room (omit `reply_to_event_id`)
-  so the user sees the response in their main timeline.
-- **Follow-ups, narration, intermediate progress**: thread under the
-  inbound `event_id`. Keeps the room uncluttered, lets the user expand
-  the thread when they want details.
-- **Multi-message replies that should be visually grouped**: thread all
-  but the first under the inbound `event_id`. The `replyToMode` access
-  setting can override (see below).
+After a long stretch of threaded progress narration, if you want to
+surface a final result with a push notification, pass
+`force_top_level: true` on that reply:
+
+```
+reply(
+  room_id = "!abc:example.com",
+  text    = "All 5 steps complete.",
+  reply_to_event_id = "$user_message:example.com",
+  force_top_level   = true,
+)
+```
+
+This posts the reply top-level (`m.text`) AND resets the routing state
+for that `event_id`, so any subsequent replies start a fresh
+"first → top, then threaded" cycle.
+
+`force_top_level: true` is a no-op when `reply_to_event_id` is absent
+(top-level is already the default).
 
 ## Reply vs. edit_message
 
@@ -62,12 +87,6 @@ The bot can only edit messages it sent itself (`event.sender ==
 botUserId`). Trying to edit a user's message returns
 `{ok: false, error: "not_owned_by_bot"}`.
 
-## When NOT to thread
-
-- A user's first question in a quiet room — top-level is friendlier
-- Short single-message replies — threading is overhead for one line
-- Cross-conversation references — Matrix threads are linear; if you're
-  bridging two conversations, link explicitly in the text instead
 
 ## `replyToMode` (operator-side config)
 
@@ -86,9 +105,10 @@ schema-stable for when chunking lands.
 
 ## Common mistakes
 
-- **Forgetting `reply_to_event_id` on follow-ups.** The plugin won't
-  auto-thread — every reply posts top-level by default. Pass the inbound
-  `event_id` explicitly each time you want threading.
+- **Using `force_top_level: true` on every reply.** That defeats the
+  auto-routing and creates multiple top-level messages instead of one
+  wake-up followed by threaded narration. Reserve it for a single final
+  result message.
 - **Using `edit_message` as the final result.** Edits don't push-notify.
   Always end with a new `reply`.
 - **Trying to edit a user's message.** Won't work — the ownership check

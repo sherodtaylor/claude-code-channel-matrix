@@ -171,6 +171,94 @@ export function loadAccess(path?: string): Access {
   }
 }
 
+// ── Reply Routing State ───────────────────────────────────────────────
+//
+// The `reply` tool tracks, per inbound user event_id, whether the bot has
+// already replied to it inside this process. The first reply per event_id
+// posts top-level (loud m.text wake-up); subsequent replies thread under
+// the inbound event (quiet m.notice narration). State is per-process; a
+// restart drops it (acceptable — matches the "session ended" UX).
+//
+// Idle TTL, not creation TTL: every reply that uses an entry refreshes
+// lastReplyAt, so an actively-threading conversation never expires
+// mid-stream. The TTL window only starts when the bot stops replying.
+
+export interface ReplyRoutingEntry {
+  lastReplyAt: number  // epoch ms
+}
+
+export const REPLY_ROUTING_IDLE_TTL_MS = 10 * 60 * 1000  // 10 min
+
+export const replyRoutingState = new Map<string, ReplyRoutingEntry>()
+
+/** Test-only: clear the module-scope routing state. */
+export function __resetReplyRoutingForTest(): void {
+  replyRoutingState.clear()
+}
+
+/** Drop entries whose lastReplyAt is older than the idle TTL window. */
+export function sweepIdleReplyRoutingEntries(
+  map: Map<string, ReplyRoutingEntry>,
+  now: number,
+): void {
+  for (const [eventId, entry] of map) {
+    if (now - entry.lastReplyAt > REPLY_ROUTING_IDLE_TTL_MS) {
+      map.delete(eventId)
+    }
+  }
+}
+
+/** Outcome of a reply routing decision. */
+export interface ReplyRoutingDecision {
+  route:        'top' | 'threaded'
+  msgtype:      'm.text' | 'm.notice'
+  threadRootId?: string
+}
+
+export interface DecideReplyRoutingArgs {
+  reply_to_event_id: string | undefined
+  force_top_level:   boolean | undefined
+}
+
+/**
+ * Decide how the next outgoing reply should be wired:
+ *  - First reply per inbound event_id → top-level (m.text)
+ *  - Subsequent replies → threaded under that event (m.notice)
+ *  - force_top_level: true → top-level + delete the entry (resets cycle)
+ *  - No reply_to_event_id → top-level (and force_top_level is ignored)
+ *
+ * Sweeps idle entries before reading the map.
+ * Mutates the map (sets/refreshes/deletes entries) in place.
+ */
+export function decideReplyRouting(
+  args: DecideReplyRoutingArgs,
+  map:  Map<string, ReplyRoutingEntry>,
+  now:  number,
+): ReplyRoutingDecision {
+  sweepIdleReplyRoutingEntries(map, now)
+
+  if (!args.reply_to_event_id) {
+    return { route: 'top', msgtype: 'm.text' }
+  }
+
+  if (args.force_top_level === true) {
+    map.delete(args.reply_to_event_id)
+    return { route: 'top', msgtype: 'm.text' }
+  }
+
+  if (map.has(args.reply_to_event_id)) {
+    map.set(args.reply_to_event_id, { lastReplyAt: now })
+    return {
+      route:        'threaded',
+      msgtype:      'm.notice',
+      threadRootId: args.reply_to_event_id,
+    }
+  }
+
+  map.set(args.reply_to_event_id, { lastReplyAt: now })
+  return { route: 'top', msgtype: 'm.text' }
+}
+
 // ── Thread Root Persistence ──────────────────────────────
 
 /** Thread roots are stored as { "roomId:project": "$eventId" }. */
@@ -415,13 +503,12 @@ export function buildMessageBody(
   text: string,
   html: string | undefined,
   threadRootId?: string,
+  msgtype: 'm.text' | 'm.notice' = 'm.text',
 ): Record<string, any> {
-  // m.text, not m.notice — some Matrix clients filter or hide notice events,
-  // which made bot replies "disappear" even though the homeserver accepted
-  // them. Bot loop prevention is already handled by shouldForwardEvent
-  // skipping events whose sender == botUserId, so the spec's rationale for
-  // m.notice doesn't apply.
-  const body: Record<string, any> = { msgtype: 'm.text', body: text }
+  // msgtype defaults to m.text (loud, push-notifies). The reply routing
+  // helper passes m.notice for threaded follow-ups so quiet narration
+  // doesn't ring a phone for every progress update.
+  const body: Record<string, any> = { msgtype, body: text }
   if (html) {
     body.format = 'org.matrix.custom.html'
     body.formatted_body = html
@@ -882,8 +969,9 @@ async function matrixReply(
   text: string,
   html?: string,
   threadRootId?: string,
+  msgtype: 'm.text' | 'm.notice' = 'm.text',
 ): Promise<string> {
-  return matrixSend(config, roomId, 'm.room.message', buildMessageBody(text, html, threadRootId))
+  return matrixSend(config, roomId, 'm.room.message', buildMessageBody(text, html, threadRootId, msgtype))
 }
 
 async function matrixReact(
@@ -1012,7 +1100,13 @@ async function relayPermissionRequest(
 
 export const replyToolDefinition = {
   name: 'reply',
-  description: 'Send a message to a Matrix room',
+  description:
+    'Send a message to a Matrix room. Auto-routing: when reply_to_event_id is set, ' +
+    'the first reply to that event is posted top-level (loud m.text, wakes the user); ' +
+    'all subsequent replies with the same reply_to_event_id are threaded under it ' +
+    '(quiet m.notice, no push notification). Use force_top_level to break out of the ' +
+    'threaded cycle and send a fresh wake-up top-level message. Without reply_to_event_id ' +
+    'the message always posts top-level.',
   inputSchema: {
     type: 'object' as const,
     properties: {
@@ -1022,12 +1116,18 @@ export const replyToolDefinition = {
       reply_to_event_id: {
         type: 'string',
         description:
-          'Event ID to thread under. When set, the message is sent as a ' +
-          'threaded reply (rel_type: m.thread) with proper m.in_reply_to ' +
-          'fallback so unthreaded clients still see it. Use this for ' +
-          'follow-ups, intermediate progress posts, and anything that ' +
-          'should land under the originating user message rather than ' +
-          'cluttering the room top-level. Omit to post top-level.',
+          'The inbound event ID that anchors auto-routing. First reply → top-level ' +
+          'm.text (loud wake-up); subsequent replies with the same ID → threaded ' +
+          'm.notice (quiet narration). Omit to always post top-level.',
+      },
+      force_top_level: {
+        type: 'boolean',
+        description:
+          'If true, post this reply top-level (not threaded) AND reset the routing ' +
+          'state for reply_to_event_id so the next reply starts a fresh "first → top, ' +
+          'then threaded" cycle. Use to wake the user with a fresh push notification ' +
+          'after a long stretch of threaded progress narration. ' +
+          'No-op when reply_to_event_id is absent (top-level is already the default).',
       },
     },
     required: ['room_id', 'text'],
@@ -1040,23 +1140,29 @@ export const mcpInstructions = [
   'Messages arrive as <channel source="matrix" room_id="..." event_id="..."',
   'sender="..." room_name="...">. To respond:',
   '',
-  '  • Call `reply(room_id, text)` for a top-level message in the room.',
-  '  • Call `reply(room_id, text, reply_to_event_id=<inbound event_id>)` to',
-  "    thread the response under the user's message. Use this for any",
-  '    follow-up after the initial response — keeps the room uncluttered.',
+  '  • Call `reply(room_id, text, reply_to_event_id=<inbound event_id>)`',
+  '    on EVERY reply you make. The plugin auto-routes:',
+  '      - First reply per inbound event_id → top-level in the main',
+  '        timeline (loud m.text wake-up).',
+  '      - Subsequent replies with the same reply_to_event_id → threaded',
+  '        under that event (quiet m.notice narration).',
+  '      - State is per-process with a 10-min idle TTL — active',
+  '        conversations never expire mid-stream.',
+  '  • Pass `force_top_level: true` to break out of the threaded',
+  '    narration cycle with a fresh top-level wake-up — e.g. the final',
+  '    result after a long task. Resets the routing state for that',
+  '    inbound event so the next reply starts a fresh cycle. No-op when',
+  '    reply_to_event_id is absent.',
+  '  • Call `reply(room_id, text)` WITHOUT reply_to_event_id only when',
+  '    you have no inbound event to anchor under — posts top-level',
+  '    m.text. The auto-routing map is untouched.',
   '  • Call `edit_message(room_id, event_id, text)` to update a prior',
-  '    message you sent in-place, e.g. interim "still working — step 3 of',
-  '    5" status. Edits do NOT generate push notifications, so ALWAYS',
-  '    follow up with a final new `reply` to wake the user when work',
-  '    completes. The bot can only edit its own messages.',
+  '    message you sent in-place, e.g. interim "still working — step 3',
+  '    of 5" status. Edits do NOT push-notify, so ALWAYS follow up with',
+  '    a final new `reply` to wake the user when work completes. The bot',
+  '    can only edit its own messages.',
   '  • Call `react(room_id, event_id, emoji)` for lightweight status',
   '    signals (👀 received, ✅ done, ❌ failed).',
-  '',
-  'Threading is per-call: pass `reply_to_event_id` on each reply that',
-  'should land in the thread. The plugin does NOT auto-thread; if you omit',
-  'the parameter, the message posts top-level. Read the inbound',
-  '`event_id` from the <channel> tag and use it as the thread root for',
-  'any narration that follows.',
 ].join('\n')
 
 function createMcpServer(config: Config, threadRootByRoom: Map<string, string>): Server {
@@ -1120,12 +1226,33 @@ function createMcpServer(config: Config, threadRootByRoom: Map<string, string>):
         if (!args.room_id || !args.text) {
           return { content: [{ type: 'text', text: 'Missing required arguments: room_id and text' }], isError: true }
         }
-        // Per-call reply_to_event_id wins over the static MATRIX_THREADS root.
-        // See docs/superpowers/specs/2026-05-27-matrix-channel-threading-tools-design.md
+
+        const replyToEventId = args.reply_to_event_id as string | undefined
+        const forceTopLevel  = (args as any).force_top_level === true
+
+        const decision = decideReplyRouting(
+          { reply_to_event_id: replyToEventId, force_top_level: forceTopLevel },
+          replyRoutingState,
+          Date.now(),
+        )
+
+        // When the decision routes top-level AND the caller did not supply a
+        // reply_to_event_id, fall back to the static MATRIX_THREADS root if
+        // configured. The auto-routing decision wins otherwise.
         const threadRootId =
-          (args.reply_to_event_id as string | undefined) ??
-          threadRootByRoom.get(args.room_id as string)
-        const eventId = await matrixReply(config, args.room_id, args.text as string, args.html as string | undefined, threadRootId)
+          decision.threadRootId ??
+          (decision.route === 'top' && !replyToEventId
+            ? threadRootByRoom.get(args.room_id as string)
+            : undefined)
+
+        const eventId = await matrixReply(
+          config,
+          args.room_id as string,
+          args.text as string,
+          args.html as string | undefined,
+          threadRootId,
+          decision.msgtype,
+        )
         // Echo the message body in the result so transcript / UI surfaces show
         // what was actually sent — a bare "sent" leaves the caller blind.
         return { content: [{ type: 'text', text: JSON.stringify({ ok: true, event_id: eventId, text: args.text }) }] }
