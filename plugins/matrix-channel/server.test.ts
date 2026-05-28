@@ -1595,17 +1595,17 @@ describe('fireTypingIndicator', () => {
 })
 
 describe('buildEditMessageBody', () => {
-  test('text-only edit of unthreaded message', () => {
+  test('text-only edit of unthreaded message uses m.notice so it does not push-notify', () => {
     const body = buildEditMessageBody({
       text: 'updated',
       eventId: '$orig:example.com',
       originalThreadRootId: undefined,
     })
     expect(body).toEqual({
-      msgtype: 'm.text',
+      msgtype: 'm.notice',
       body:    '* updated',
       'm.new_content': {
-        msgtype: 'm.text',
+        msgtype: 'm.notice',
         body:    'updated',
       },
       'm.relates_to': {
@@ -1622,7 +1622,7 @@ describe('buildEditMessageBody', () => {
       eventId: '$orig:example.com',
       originalThreadRootId: undefined,
     })
-    expect(body.msgtype).toBe('m.text')
+    expect(body.msgtype).toBe('m.notice')
     expect(body.body).toBe('* updated')
     expect(body.format).toBe('org.matrix.custom.html')
     expect(body.formatted_body).toBe('* <b>updated</b>')
@@ -1630,12 +1630,14 @@ describe('buildEditMessageBody', () => {
     expect((body['m.new_content'] as any).formatted_body).toBe('<b>updated</b>')
   })
 
-  test('text-only edit of THREADED message includes thread reference', () => {
+  test('text-only edit of THREADED message includes thread reference and uses m.notice', () => {
     const body = buildEditMessageBody({
       text: 'updated',
       eventId: '$orig:example.com',
       originalThreadRootId: '$thread_root:example.com',
     })
+    expect(body.msgtype).toBe('m.notice')
+    expect((body['m.new_content'] as any).msgtype).toBe('m.notice')
     expect(body['m.relates_to']).toEqual({
       rel_type: 'm.replace',
       event_id: '$orig:example.com',
@@ -1647,13 +1649,15 @@ describe('buildEditMessageBody', () => {
     })
   })
 
-  test('text+html edit of THREADED message includes thread reference', () => {
+  test('text+html edit of THREADED message includes thread reference and uses m.notice', () => {
     const body = buildEditMessageBody({
       text: 'updated',
       html: '<b>updated</b>',
       eventId: '$orig:example.com',
       originalThreadRootId: '$thread_root:example.com',
     })
+    expect(body.msgtype).toBe('m.notice')
+    expect((body['m.new_content'] as any).msgtype).toBe('m.notice')
     // Same html assertions
     expect(body.formatted_body).toBe('* <b>updated</b>')
     expect((body['m.new_content'] as any).formatted_body).toBe('<b>updated</b>')
