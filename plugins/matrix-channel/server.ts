@@ -452,8 +452,12 @@ export interface BuildEditMessageBodyArgs {
 }
 
 export function buildEditMessageBody(args: BuildEditMessageBodyArgs): Record<string, unknown> {
+  // Edits use m.notice so they do not push-notify the recipient — per the
+  // matrix:threading skill, edits are for in-place progress updates and the
+  // operator wakes the user with a fresh reply at the end. m.text on edits
+  // made every interim progress edit ring a phone.
   const newContent: Record<string, unknown> = {
-    msgtype: 'm.text',
+    msgtype: 'm.notice',
     body:    args.text,
   }
   if (args.html !== undefined) {
@@ -474,7 +478,7 @@ export function buildEditMessageBody(args: BuildEditMessageBodyArgs): Record<str
   }
 
   const body: Record<string, unknown> = {
-    msgtype: 'm.text',
+    msgtype: 'm.notice',
     body:    '* ' + args.text,
     'm.new_content': newContent,
     'm.relates_to':  relatesTo,
