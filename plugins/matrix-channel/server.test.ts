@@ -1,5 +1,5 @@
 import { describe, expect, test, beforeEach, afterEach } from 'bun:test'
-import { loadConfig, loadAccess, DEFAULT_MAX_IMAGE_SIZE, type Config, type Access } from './server'
+import { loadConfig, loadAccess, DEFAULT_MAX_IMAGE_SIZE, mcpInstructions, type Config, type Access } from './server'
 import { shouldForwardEvent, shouldAutoJoin, type SyncEvent, type SyncInvite, type TextEvent, type ImageEvent } from './server'
 import { downloadImage, scheduleImageCleanup, cleanupAllImages, trackedImages } from './server'
 import { loadThreadRoots, saveThreadRoot } from './server'
@@ -1725,6 +1725,20 @@ describe('reply tool schema', () => {
   })
 })
 
+describe('mcpInstructions reflects auto-routing contract', () => {
+  test('mentions auto-routes and force_top_level', () => {
+    expect(mcpInstructions).toContain('auto-routes')
+    expect(mcpInstructions).toContain('force_top_level')
+  })
+
+  test('no longer instructs agents to manually thread', () => {
+    // The pre-change paragraph "Threading is per-call: pass reply_to_event_id
+    // on each reply that should land in the thread" is no longer accurate.
+    expect(mcpInstructions).not.toContain('Threading is per-call')
+    expect(mcpInstructions).not.toContain('The plugin does NOT auto-thread')
+  })
+})
+
 describe('reply tool handler routing integration', () => {
   // We test the handler indirectly via the exported decision + the
   // module-scope map. Direct MCP invocation requires the server to be
@@ -2005,7 +2019,7 @@ describe('MCP server instructions', () => {
     expect(mcpInstructions).toContain('reply_to_event_id')
     expect(mcpInstructions).toContain('edit_message')
     expect(mcpInstructions).toContain('event_id')
-    expect(mcpInstructions).toContain('Threading')
+    expect(mcpInstructions).toContain('threaded')
   })
 })
 
