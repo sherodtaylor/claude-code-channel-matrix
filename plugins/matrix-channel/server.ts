@@ -416,7 +416,12 @@ export function buildMessageBody(
   html: string | undefined,
   threadRootId?: string,
 ): Record<string, any> {
-  const body: Record<string, any> = { msgtype: 'm.notice', body: text }
+  // m.text, not m.notice — some Matrix clients filter or hide notice events,
+  // which made bot replies "disappear" even though the homeserver accepted
+  // them. Bot loop prevention is already handled by shouldForwardEvent
+  // skipping events whose sender == botUserId, so the spec's rationale for
+  // m.notice doesn't apply.
+  const body: Record<string, any> = { msgtype: 'm.text', body: text }
   if (html) {
     body.format = 'org.matrix.custom.html'
     body.formatted_body = html
