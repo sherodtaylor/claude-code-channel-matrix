@@ -969,8 +969,9 @@ async function matrixReply(
   text: string,
   html?: string,
   threadRootId?: string,
+  msgtype: 'm.text' | 'm.notice' = 'm.text',
 ): Promise<string> {
-  return matrixSend(config, roomId, 'm.room.message', buildMessageBody(text, html, threadRootId))
+  return matrixSend(config, roomId, 'm.room.message', buildMessageBody(text, html, threadRootId, msgtype))
 }
 
 async function matrixReact(
@@ -1099,7 +1100,13 @@ async function relayPermissionRequest(
 
 export const replyToolDefinition = {
   name: 'reply',
-  description: 'Send a message to a Matrix room',
+  description:
+    'Send a message to a Matrix room. Auto-routing: when reply_to_event_id is set, ' +
+    'the first reply to that event is posted top-level (loud m.text, wakes the user); ' +
+    'all subsequent replies with the same reply_to_event_id are threaded under it ' +
+    '(quiet m.notice, no push notification). Use force_top_level to break out of the ' +
+    'threaded cycle and send a fresh wake-up top-level message. Without reply_to_event_id ' +
+    'the message always posts top-level.',
   inputSchema: {
     type: 'object' as const,
     properties: {
@@ -1109,12 +1116,18 @@ export const replyToolDefinition = {
       reply_to_event_id: {
         type: 'string',
         description:
-          'Event ID to thread under. When set, the message is sent as a ' +
-          'threaded reply (rel_type: m.thread) with proper m.in_reply_to ' +
-          'fallback so unthreaded clients still see it. Use this for ' +
-          'follow-ups, intermediate progress posts, and anything that ' +
-          'should land under the originating user message rather than ' +
-          'cluttering the room top-level. Omit to post top-level.',
+          'The inbound event ID that anchors auto-routing. First reply → top-level ' +
+          'm.text (loud wake-up); subsequent replies with the same ID → threaded ' +
+          'm.notice (quiet narration). Omit to always post top-level.',
+      },
+      force_top_level: {
+        type: 'boolean',
+        description:
+          'If true, post this reply top-level (not threaded) AND reset the routing ' +
+          'state for reply_to_event_id so the next reply starts a fresh "first → top, ' +
+          'then threaded" cycle. Use to wake the user with a fresh push notification ' +
+          'after a long stretch of threaded progress narration. ' +
+          'No-op when reply_to_event_id is absent (top-level is already the default).',
       },
     },
     required: ['room_id', 'text'],
@@ -1207,12 +1220,33 @@ function createMcpServer(config: Config, threadRootByRoom: Map<string, string>):
         if (!args.room_id || !args.text) {
           return { content: [{ type: 'text', text: 'Missing required arguments: room_id and text' }], isError: true }
         }
-        // Per-call reply_to_event_id wins over the static MATRIX_THREADS root.
-        // See docs/superpowers/specs/2026-05-27-matrix-channel-threading-tools-design.md
+
+        const replyToEventId = args.reply_to_event_id as string | undefined
+        const forceTopLevel  = (args as any).force_top_level === true
+
+        const decision = decideReplyRouting(
+          { reply_to_event_id: replyToEventId, force_top_level: forceTopLevel },
+          replyRoutingState,
+          Date.now(),
+        )
+
+        // When the decision routes top-level AND the caller did not supply a
+        // reply_to_event_id, fall back to the static MATRIX_THREADS root if
+        // configured. The auto-routing decision wins otherwise.
         const threadRootId =
-          (args.reply_to_event_id as string | undefined) ??
-          threadRootByRoom.get(args.room_id as string)
-        const eventId = await matrixReply(config, args.room_id, args.text as string, args.html as string | undefined, threadRootId)
+          decision.threadRootId ??
+          (decision.route === 'top' && !replyToEventId
+            ? threadRootByRoom.get(args.room_id as string)
+            : undefined)
+
+        const eventId = await matrixReply(
+          config,
+          args.room_id as string,
+          args.text as string,
+          args.html as string | undefined,
+          threadRootId,
+          decision.msgtype,
+        )
         // Echo the message body in the result so transcript / UI surfaces show
         // what was actually sent — a bare "sent" leaves the caller blind.
         return { content: [{ type: 'text', text: JSON.stringify({ ok: true, event_id: eventId, text: args.text }) }] }
